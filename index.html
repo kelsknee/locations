@@ -50,6 +50,16 @@
     box-shadow:0 1px 4px rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center}
   .pin svg{transform:rotate(45deg);width:16px;height:16px}
   .me{width:16px;height:16px;border-radius:50%;background:#2b6cb0;border:3px solid #fff;box-shadow:0 0 0 2px rgba(43,108,176,.35)}
+  .snaprow{display:flex;align-items:center;gap:8px}
+  .snaprow .btn{display:inline-flex;align-items:center;gap:6px}
+  .snaprow svg{width:18px;height:18px}
+  .snaprow img{width:44px;height:44px;object-fit:cover;border-radius:8px;border:1px solid var(--line)}
+  .snaprow .hint{font-size:13px;color:var(--muted)}
+  li .thumb{flex:0 0 44px;width:44px;height:44px;border-radius:8px;object-fit:cover;border:1px solid var(--line);cursor:pointer;padding:0;background:#fff}
+  li .thumb.none{display:flex;align-items:center;justify-content:center;color:var(--muted);border-style:dashed}
+  li .thumb svg{width:20px;height:20px}
+  .popimg{display:block;width:200px;max-width:100%;border-radius:6px;margin-top:6px}
+  [hidden]{display:none!important}
   @media (prefers-reduced-motion:no-preference){.type{transition:background .12s}}
 </style>
 </head>
@@ -66,6 +76,14 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5"/></svg>Tires</button>
   </div>
 
+  <div class="snaprow">
+    <button id="snap" class="btn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>Take photo</button>
+    <img id="stage" alt="Photo that will be attached to the next pin" hidden>
+    <button id="unstage" class="btn quiet" type="button" hidden>Remove</button>
+    <span id="snaphint" class="hint">Optional. Attaches to the next pin.</span>
+    <input id="file" type="file" accept="image/*" capture="environment" hidden>
+  </div>
+
   <button id="go" class="go">Log pin at my location</button>
   <div id="status" class="status" role="status" aria-live="polite">Waiting for GPS…</div>
 
@@ -74,6 +92,7 @@
     <div class="actions">
       <button id="copy" class="btn">Copy addresses</button>
       <button id="csv" class="btn solid">Export CSV</button>
+      <button id="zip" class="btn">Photos ZIP</button>
       <button id="clear" class="btn quiet">Clear</button>
     </div>
   </div>
@@ -89,6 +108,57 @@
     tires:{label:"Tires",color:"#2b2f36",svg:'<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></svg>'}
   };
   var KEY = "sitePinLogger.v1";
+  var CAM = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>';
+
+  // Photo storage (IndexedDB, keyed by pin id). Pins in localStorage just hold hasPhoto.
+  var dbp = new Promise(function(res){
+    try {
+      var rq = indexedDB.open("sitePinLogger",1);
+      rq.onupgradeneeded = function(){ rq.result.createObjectStore("photos"); };
+      rq.onsuccess = function(){ res(rq.result); };
+      rq.onerror = function(){ res(null); };
+    } catch(e){ res(null); }
+  });
+  function tx(mode,fn){
+    return dbp.then(function(db){
+      if (!db) return null;
+      return new Promise(function(res){
+        var t = db.transaction("photos",mode), r = fn(t.objectStore("photos"));
+        t.oncomplete = function(){ res(r && r.result!==undefined ? r.result : true); };
+        t.onerror = t.onabort = function(){ res(null); };
+      });
+    });
+  }
+  var photoURLs = {};
+  function putPhoto(id,blob){ return tx("readwrite",function(s){ return s.put(blob,id); }).then(function(ok){
+    if (!ok) return false;
+    if (photoURLs[id]) URL.revokeObjectURL(photoURLs[id]);
+    photoURLs[id] = URL.createObjectURL(blob); return true; }); }
+  function getPhoto(id){ return tx("readonly",function(s){ return s.get(id); }); }
+  function delPhoto(id){
+    if (photoURLs[id]){ URL.revokeObjectURL(photoURLs[id]); delete photoURLs[id]; }
+    return tx("readwrite",function(s){ return s.delete(id); });
+  }
+  function clearPhotos(){
+    Object.keys(photoURLs).forEach(function(k){ URL.revokeObjectURL(photoURLs[k]); }); photoURLs = {};
+    return tx("readwrite",function(s){ return s.clear(); });
+  }
+  // Shrink phone photos (often 4-12 MB) to ~1600px JPEG so dozens of pins fit.
+  function shrink(file){
+    return new Promise(function(res,rej){
+      var url = URL.createObjectURL(file), img = new Image();
+      img.onload = function(){
+        var k = Math.min(1, 1600/Math.max(img.naturalWidth,img.naturalHeight));
+        var c = document.createElement("canvas");
+        c.width = Math.round(img.naturalWidth*k); c.height = Math.round(img.naturalHeight*k);
+        c.getContext("2d").drawImage(img,0,0,c.width,c.height);
+        URL.revokeObjectURL(url);
+        c.toBlob(function(b){ b ? res(b) : rej(); },"image/jpeg",0.82);
+      };
+      img.onerror = function(){ URL.revokeObjectURL(url); rej(); };
+      img.src = url;
+    });
+  }
   var pins = [];
   var current = "brush";
   var lastFix = null;
@@ -109,7 +179,8 @@
   }
   function addMarker(p){
     var m = L.marker([p.lat,p.lng],{icon:pinIcon(p.type)}).addTo(map);
-    m.bindPopup(function(){ return "<b>"+TYPES[p.type].label+"</b><br>"+esc(p.address||fmtCoord(p)); });
+    m.bindPopup(function(){ return "<b>"+TYPES[p.type].label+"</b><br>"+esc(p.address||fmtCoord(p))+
+      (photoURLs[p.id]?'<img class="popimg" alt="Photo of this pin" src="'+photoURLs[p.id]+'">':""); });
     markers[p.id] = m;
   }
   function esc(s){ return String(s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];}); }
@@ -181,6 +252,33 @@
       });
   }
 
+  // Photo capture: take one before logging (attaches to the next pin), or add/replace on an existing pin
+  var fileEl = document.getElementById("file"), stageEl = document.getElementById("stage");
+  var staged = null, stagedURL = null, targetId = null;
+  function showStage(){
+    if (stagedURL){ URL.revokeObjectURL(stagedURL); stagedURL = null; }
+    if (staged){ stagedURL = URL.createObjectURL(staged); stageEl.src = stagedURL; }
+    stageEl.hidden = !staged;
+    document.getElementById("unstage").hidden = !staged;
+    document.getElementById("snaphint").hidden = !!staged;
+  }
+  document.getElementById("snap").addEventListener("click",function(){ targetId = null; fileEl.value = ""; fileEl.click(); });
+  document.getElementById("unstage").addEventListener("click",function(){ staged = null; showStage(); });
+  fileEl.addEventListener("change",function(){
+    var f = fileEl.files && fileEl.files[0], id = targetId; targetId = null;
+    if (!f) return;
+    setStatus("Processing photo…");
+    shrink(f).then(function(b){
+      if (!id){ staged = b; showStage(); setStatus("Photo ready. It will attach to the next pin you log."); return; }
+      var p = pins.filter(function(x){return x.id===id;})[0];
+      if (!p) return;
+      return putPhoto(id,b).then(function(ok){
+        if (!ok){ setStatus("Couldn't store the photo on this device.",true); return; }
+        p.hasPhoto = true; save(); render(); setStatus("Photo saved to that pin.");
+      });
+    },function(){ setStatus("Couldn't read that photo.",true); });
+  });
+
   // Log a pin
   var goBtn = document.getElementById("go");
   goBtn.addEventListener("click",function(){
@@ -189,6 +287,10 @@
       var p = {id:Date.now().toString(36)+Math.random().toString(36).slice(2,5),
         type:current,lat:pos.coords.latitude,lng:pos.coords.longitude,
         acc:Math.round(pos.coords.accuracy),time:new Date().toISOString(),address:"",addrPending:true};
+      var shot = staged; staged = null; showStage();
+      if (shot){ p.hasPhoto = true; putPhoto(p.id,shot).then(function(ok){
+        if (!ok){ p.hasPhoto = false; save(); setStatus("Pin saved, but the photo couldn't be stored.",true); }
+        render(); }); }
       pins.push(p); save(); addMarker(p); map.panTo([p.lat,p.lng]); render(); geocode(p);
       if (navigator.vibrate) navigator.vibrate(40);
       done();
@@ -209,10 +311,14 @@
     if (!pins.length){ listEl.innerHTML = '<li class="empty">No pins yet. Pick a type, then tap Log pin.</li>'; return; }
     listEl.innerHTML = pins.slice().reverse().map(function(p){
       var t = new Date(p.time).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"});
-      return '<li data-id="'+p.id+'"><span class="dot" style="background:'+TYPES[p.type].color+'"></span>'+
+      var th = photoURLs[p.id]
+        ? '<img class="thumb" alt="Photo. Tap to view." data-view="'+p.id+'" src="'+photoURLs[p.id]+'">'
+        : '<button class="thumb none" aria-label="Add photo" data-photo="'+p.id+'">'+CAM+'</button>';
+      return '<li data-id="'+p.id+'">'+th+'<span class="dot" style="background:'+TYPES[p.type].color+'"></span>'+
         '<div class="txt"><div class="addr">'+esc(p.address||(p.addrPending?"Finding address…":fmtCoord(p)))+'</div>'+
         '<div class="meta">'+TYPES[p.type].label+' · '+t+' · ±'+p.acc+' m</div>'+
         '<div class="meta">'+fmtCoord(p)+(p.addrKind==="Nearest"?" · no street number":"")+'</div></div>'+
+        '<button aria-label="Replace photo" data-photo="'+p.id+'"'+(photoURLs[p.id]?'':' hidden')+'>'+CAM+'</button>'+
         '<button aria-label="Edit address" data-edit="'+p.id+'">&#9998;</button>'+
         '<button aria-label="Delete pin" data-del="'+p.id+'">&times;</button></li>';
     }).join("");
@@ -225,8 +331,13 @@
       if (v !== null){ ep.address = v.trim(); ep.edited = !!ep.address; ep.addrKind = ep.address ? "Edited" : "None"; save(); render(); }
       return;
     }
+    var btn = e.target.closest("[data-photo]");
+    if (btn){ targetId = btn.getAttribute("data-photo"); fileEl.value = ""; fileEl.click(); return; }
+    var vid = e.target.getAttribute("data-view");
+    if (vid){ window.open(photoURLs[vid],"_blank"); return; }
     var id = e.target.getAttribute("data-del");
     if (id){
+      delPhoto(id);
       pins = pins.filter(function(p){return p.id!==id;});
       if (markers[id]){ map.removeLayer(markers[id]); delete markers[id]; }
       save(); render(); return;
@@ -237,18 +348,63 @@
 
   // Export
   function csvCell(v){ v = String(v==null?"":v); return /[",\n]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v; }
-  document.getElementById("csv").addEventListener("click",function(){
-    if (!pins.length){ setStatus("Log at least one pin first.",true); return; }
-    var rows = [["Type","Address","Address quality","Latitude","Longitude","Accuracy (m)","Logged at","Map link"]];
-    pins.forEach(function(p){ rows.push([TYPES[p.type].label,p.address||"",p.addrKind||(p.address?"":"None"),p.lat.toFixed(6),p.lng.toFixed(6),p.acc,p.time,"https://www.google.com/maps?q="+p.lat.toFixed(6)+","+p.lng.toFixed(6)]); });
-    var csv = rows.map(function(r){return r.map(csvCell).join(",");}).join("\r\n");
-    var blob = new Blob(["\ufeff"+csv],{type:"text/csv;charset=utf-8"});
+  function photoName(p,i){ return "photos/"+String(i+1).padStart(3,"0")+"-"+p.type+".jpg"; }
+  function buildCsv(){
+    var rows = [["Type","Address","Address quality","Latitude","Longitude","Accuracy (m)","Logged at","Map link","Photo file"]];
+    pins.forEach(function(p,i){ rows.push([TYPES[p.type].label,p.address||"",p.addrKind||(p.address?"":"None"),p.lat.toFixed(6),p.lng.toFixed(6),p.acc,p.time,"https://www.google.com/maps?q="+p.lat.toFixed(6)+","+p.lng.toFixed(6),p.hasPhoto?photoName(p,i):""]); });
+    return "\ufeff"+rows.map(function(r){return r.map(csvCell).join(",");}).join("\r\n");
+  }
+  function download(blob,name){
     var a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "site-pins-"+new Date().toISOString().slice(0,10)+".csv";
+    a.href = URL.createObjectURL(blob); a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(function(){ URL.revokeObjectURL(a.href); },2000);
-    setStatus("Exported "+pins.length+" pins. Every row has lat/long and a map link, even where there's no street address.");
+  }
+  var today = function(){ return new Date().toISOString().slice(0,10); };
+  document.getElementById("csv").addEventListener("click",function(){
+    if (!pins.length){ setStatus("Log at least one pin first.",true); return; }
+    download(new Blob([buildCsv()],{type:"text/csv;charset=utf-8"}),"site-pins-"+today()+".csv");
+    setStatus("Exported "+pins.length+" pins. Every row has lat/long and a map link, even where there's no street address. Use Photos ZIP to get the photos.");
+  });
+
+  // Minimal ZIP writer (stored, no compression; JPEGs are already compressed)
+  var crcT = (function(){ var t=[],c,n,k; for(n=0;n<256;n++){ c=n; for(k=0;k<8;k++) c = c&1 ? 0xEDB88320^(c>>>1) : c>>>1; t[n]=c>>>0; } return t; })();
+  function crc32(u8){ var c=0xFFFFFFFF; for(var i=0;i<u8.length;i++) c = crcT[(c^u8[i])&255]^(c>>>8); return (c^0xFFFFFFFF)>>>0; }
+  function makeZip(files){ // [{name, data:Uint8Array}]
+    var enc = new TextEncoder(), parts = [], central = [], off = 0, d = new Date();
+    var dt = ((d.getFullYear()-1980)<<9)|((d.getMonth()+1)<<5)|d.getDate(), tm = (d.getHours()<<11)|(d.getMinutes()<<5)|(d.getSeconds()>>1);
+    files.forEach(function(f){
+      var nm = enc.encode(f.name), crc = crc32(f.data), sz = f.data.length;
+      var h = new DataView(new ArrayBuffer(30));
+      h.setUint32(0,0x04034b50,true); h.setUint16(4,20,true); h.setUint16(6,0x0800,true); h.setUint16(8,0,true);
+      h.setUint16(10,tm,true); h.setUint16(12,dt,true); h.setUint32(14,crc,true); h.setUint32(18,sz,true); h.setUint32(22,sz,true);
+      h.setUint16(26,nm.length,true); h.setUint16(28,0,true);
+      var c = new DataView(new ArrayBuffer(46));
+      c.setUint32(0,0x02014b50,true); c.setUint16(4,20,true); c.setUint16(6,20,true); c.setUint16(8,0x0800,true); c.setUint16(10,0,true);
+      c.setUint16(12,tm,true); c.setUint16(14,dt,true); c.setUint32(16,crc,true); c.setUint32(20,sz,true); c.setUint32(24,sz,true);
+      c.setUint16(28,nm.length,true); c.setUint32(42,off,true);
+      parts.push(h.buffer,nm,f.data); central.push(c.buffer,nm);
+      off += 30+nm.length+sz;
+    });
+    var csz = central.reduce(function(a,b){ return a+(b.byteLength||b.length); },0);
+    var e = new DataView(new ArrayBuffer(22));
+    e.setUint32(0,0x06054b50,true); e.setUint16(8,files.length,true); e.setUint16(10,files.length,true);
+    e.setUint32(12,csz,true); e.setUint32(16,off,true);
+    return new Blob(parts.concat(central,[e.buffer]),{type:"application/zip"});
+  }
+  document.getElementById("zip").addEventListener("click",function(){
+    if (!pins.length){ setStatus("Log at least one pin first.",true); return; }
+    setStatus("Building ZIP…");
+    var withPhoto = pins.map(function(p,i){ return {p:p,i:i}; }).filter(function(x){ return x.p.hasPhoto; });
+    Promise.all(withPhoto.map(function(x){
+      return getPhoto(x.p.id).then(function(b){ return b && b.arrayBuffer ? b.arrayBuffer() : null; })
+        .then(function(buf){ return buf ? {name:photoName(x.p,x.i),data:new Uint8Array(buf)} : null; });
+    })).then(function(list){
+      var files = list.filter(Boolean);
+      files.unshift({name:"site-pins.csv",data:new TextEncoder().encode(buildCsv())});
+      download(makeZip(files),"site-pins-"+today()+".zip");
+      setStatus("Exported ZIP with "+pins.length+" pins and "+(files.length-1)+" photos.");
+    });
   });
   document.getElementById("copy").addEventListener("click",function(){
     if (!pins.length){ setStatus("Log at least one pin first.",true); return; }
@@ -261,11 +417,14 @@
     if (!pins.length) return;
     if (confirm("Delete all "+pins.length+" pins? Export first if you need them.")){
       Object.keys(markers).forEach(function(id){ map.removeLayer(markers[id]); });
-      markers = {}; pins = []; save(); render();
+      markers = {}; pins = []; clearPhotos(); save(); render();
     }
   });
 
   // Boot
+  Promise.all(pins.filter(function(p){return p.hasPhoto;}).map(function(p){
+    return getPhoto(p.id).then(function(b){ if (b && b.size) photoURLs[p.id] = URL.createObjectURL(b); });
+  })).then(function(){ render(); });
   pins.forEach(function(p){ addMarker(p); if (!p.address) geocode(p); });
   if (pins.length) map.fitBounds(L.latLngBounds(pins.map(function(p){return [p.lat,p.lng];})),{maxZoom:17,padding:[30,30]});
   render();
