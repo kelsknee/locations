@@ -63,6 +63,10 @@
   .btn.rec[aria-pressed="true"]{background:#c0392b;border-color:#c0392b;color:#fff}
   .trackrow .info{font-size:13px;color:var(--muted);flex:1 1 auto;min-width:90px}
   li .meta button.lnk{font:inherit;font-weight:600;color:#2b6cb0;text-decoration:underline;padding:0;border:0;background:none;cursor:pointer;font-size:12px}
+  .locate{width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:#fff;color:var(--muted);
+    border:2px solid rgba(0,0,0,.25);border-radius:6px;cursor:pointer;padding:0}
+  .locate svg{width:24px;height:24px}
+  .locate[aria-pressed="true"]{color:#2b6cb0}
   [hidden]{display:none!important}
   @media (prefers-reduced-motion:no-preference){.type{transition:background .12s}}
 </style>
@@ -181,6 +185,24 @@
   L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,
     attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(map);
 
+  // Follow mode: the map keeps your location in view. Dragging the map or opening a pin pauses it.
+  var follow = true;
+  var LocateCtl = L.Control.extend({options:{position:"topright"},onAdd:function(){
+    var b = L.DomUtil.create("button","locate");
+    b.type = "button"; b.setAttribute("aria-label","Center map on my location and follow me");
+    b.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>';
+    L.DomEvent.disableClickPropagation(b);
+    b.addEventListener("click",function(){
+      follow = true; setFollowUI();
+      if (lastFix) map.setView([lastFix.coords.latitude,lastFix.coords.longitude],Math.max(map.getZoom(),17));
+    });
+    this._b = b; return b;
+  }});
+  var locateCtl = new LocateCtl().addTo(map);
+  function setFollowUI(){ locateCtl._b.setAttribute("aria-pressed",follow?"true":"false"); }
+  setFollowUI();
+  map.on("dragstart popupopen",function(){ follow = false; setFollowUI(); });
+
   var markers = {};
   var meMarker = null, meCircle = null;
 
@@ -216,6 +238,7 @@
         meCircle = L.circle(ll,{radius:pos.coords.accuracy,color:"#2b6cb0",weight:1,fillOpacity:.08,interactive:false}).addTo(map);
       } else { meMarker.setLatLng(ll); meCircle.setLatLng(ll).setRadius(pos.coords.accuracy); }
       if (first){ map.setView(ll,18); first = false; }
+      else if (follow && map.latLngToContainerPoint(ll).distanceTo(map.getSize().divideBy(2)) > 40) map.panTo(ll,{animate:true,duration:.5});
       var a = Math.round(pos.coords.accuracy);
       if (!waitingFix && Date.now()>holdStatus) setStatus("GPS ready, accurate to about "+a+" m"+(a>30?". Move into the open for a better fix.":"."), a>30);
     },function(err){
