@@ -209,6 +209,7 @@
     navigator.geolocation.watchPosition(function(pos){
       lastFix = pos;
       onFix(pos);
+      if (waitingFix) waitingFix(pos);
       var ll = [pos.coords.latitude,pos.coords.longitude];
       if (!meMarker){
         meMarker = L.marker(ll,{icon:L.divIcon({className:"",html:'<div class="me"></div>',iconSize:[16,16],iconAnchor:[8,8]}),interactive:false,zIndexOffset:-100}).addTo(map);
@@ -383,13 +384,14 @@
   function countLabel(p){ return p.type==="tires" ? (p.count===""||p.count==null ? "count unknown" : p.count+(p.count===1?" tire":" tires")) : ""; }
 
   // Log a pin
+  var waitingFix = null;
   var goBtn = document.getElementById("go");
   goBtn.addEventListener("click",function(){
     var count = null, type = current;
     if (type === "tires"){ count = askCount(); if (count === null){ setStatus("Cancelled. No pin logged."); return; } }
     goBtn.disabled = true; goBtn.textContent = "Getting exact location…";
     var finished = false, timer = null;
-    function done(){ finished = true; clearTimeout(timer); goBtn.disabled = false; goBtn.textContent = "Log pin at my location"; }
+    function done(){ finished = true; waitingFix = null; clearTimeout(timer); goBtn.disabled = false; goBtn.textContent = "Log pin at my location"; }
     function fail(msg){ if (finished) return; setStatus(msg,true); done(); }
     function log(pos){
       if (finished) return;
@@ -408,16 +410,21 @@
       } catch(e){ setStatus("Something went wrong saving that pin. Try again.",true); }
       done();
     }
-    // Use the live GPS fix if it's fresh (instant, and what the blue dot shows); otherwise ask once more.
-    // Phones can leave a location request hanging forever, so never wait more than 12 s.
-    if (lastFix && Date.now()-lastFix.timestamp < 10000){ log(lastFix); return; }
+    // Only ever log a fix taken after the tap: a live fix from the last 3 s, else the next fix
+    // that arrives (from the continuous GPS watch or a fresh request). Never reuse an old location.
+    var tapped = Date.now();
+    function fresh(pos){ return pos && pos.timestamp >= tapped-3000; }
+    function take(pos){ if (!fresh(pos)) return; waitingFix = null; log(pos); }
+    if (fresh(lastFix)){ log(lastFix); return; }
+    waitingFix = take;
     timer = setTimeout(function(){
-      if (lastFix && Date.now()-lastFix.timestamp < 120000) log(lastFix);
-      else fail("Couldn't get a GPS fix. Move into the open, check that Location is allowed, and try again.");
-    },12000);
-    navigator.geolocation.getCurrentPosition(log,function(err){
+      waitingFix = null;
+      fail("No fresh GPS fix yet, so nothing was logged. Move into the open and tap again.");
+    },15000);
+    navigator.geolocation.getCurrentPosition(take,function(err){
+      waitingFix = null;
       fail(err.code===1?"Location is blocked. Allow location for this site.":"Couldn't get your location. Try again in a moment.");
-    },{enableHighAccuracy:true,maximumAge:5000,timeout:10000});
+    },{enableHighAccuracy:true,maximumAge:0,timeout:15000});
   });
 
   // List
