@@ -67,6 +67,10 @@
     border:2px solid rgba(0,0,0,.25);border-radius:6px;cursor:pointer;padding:0}
   .locate svg{width:24px;height:24px}
   .locate[aria-pressed="true"]{color:#2b6cb0}
+  .gorow{display:flex;gap:8px}
+  .gorow .go{flex:1 1 auto;width:auto}
+  .undo{flex:0 0 auto;padding:0 14px;border-radius:14px}
+  .undo:disabled{opacity:.4}
   [hidden]{display:none!important}
   @media (prefers-reduced-motion:no-preference){.type{transition:background .12s}}
 </style>
@@ -99,7 +103,10 @@
     <input id="file" type="file" accept="image/*" capture="environment" hidden>
   </div>
 
-  <button id="go" class="go">Log pin at my location</button>
+  <div class="gorow">
+    <button id="go" class="go">Log pin at my location</button>
+    <button id="undo" class="btn undo" type="button" disabled aria-label="Remove the last pin">Undo last</button>
+  </div>
   <div id="status" class="status" role="status" aria-live="polite">Waiting for GPS…</div>
 
   <div class="bar">
@@ -464,6 +471,7 @@
   function render(){
     var c = {brush:0,trash:0,tires:0}, tireTotal = 0;
     pins.forEach(function(p){ c[p.type]++; if (p.type==="tires" && p.count) tireTotal += p.count; });
+    document.getElementById("undo").disabled = !pins.length;
     countsEl.textContent = pins.length+" pin"+(pins.length===1?"":"s")+
       (pins.length?" · Brush "+c.brush+" · Trash "+c.trash+" · Tires "+c.tires+(tireTotal?" ("+tireTotal+" total)":""):"");
     if (!pins.length){ listEl.innerHTML = '<li class="empty">No pins yet. Pick a type, then tap Log pin.</li>'; return; }
@@ -481,6 +489,20 @@
         '<button aria-label="Delete pin" data-del="'+p.id+'">&times;</button></li>';
     }).join("");
   }
+  function removePin(id){
+    delPhoto(id);
+    pins = pins.filter(function(p){return p.id!==id;});
+    if (markers[id]){ map.removeLayer(markers[id]); delete markers[id]; }
+    save(); render();
+  }
+  document.getElementById("undo").addEventListener("click",function(){
+    var p = pins[pins.length-1];
+    if (!p) return;
+    var t = new Date(p.time).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"});
+    if (confirm("Remove the last pin?\n\n"+TYPES[p.type].label+(p.type==="tires"?" ("+countLabel(p)+")":"")+" at "+t+(p.address?"\n"+p.address:"")+(p.hasPhoto?"\n(its photo will be removed too)":""))){
+      removePin(p.id); setStatus("Removed the last pin.");
+    }
+  });
   listEl.addEventListener("click",function(e){
     var eid = e.target.getAttribute("data-edit");
     if (eid){
@@ -501,12 +523,7 @@
     var vid = e.target.getAttribute("data-view");
     if (vid){ window.open(photoURLs[vid],"_blank"); return; }
     var id = e.target.getAttribute("data-del");
-    if (id){
-      delPhoto(id);
-      pins = pins.filter(function(p){return p.id!==id;});
-      if (markers[id]){ map.removeLayer(markers[id]); delete markers[id]; }
-      save(); render(); return;
-    }
+    if (id){ removePin(id); return; }
     var li = e.target.closest("li[data-id]");
     if (li && markers[li.dataset.id]){ var m = markers[li.dataset.id]; map.setView(m.getLatLng(),18); m.openPopup(); }
   });
