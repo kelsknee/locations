@@ -71,6 +71,16 @@
   .gorow .go{flex:1 1 auto;width:auto}
   .undo{flex:0 0 auto;padding:0 14px;border-radius:14px}
   .undo:disabled{opacity:.4}
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:flex-start;justify-content:center;
+    padding:max(24px,env(safe-area-inset-top,0px)) 16px 16px;z-index:5000}
+  .modal .card{background:#fff;border-radius:16px;padding:18px;width:100%;max-width:340px;margin-top:12vh;box-shadow:0 8px 30px rgba(0,0,0,.35)}
+  .modal h2{margin:0 0 4px;font-size:18px}
+  .modal p{margin:0 0 12px;font-size:14px;color:var(--muted)}
+  .modal input{width:100%;font:700 28px/1 inherit;text-align:center;padding:12px;border:2px solid var(--ink);border-radius:12px;color:var(--ink)}
+  .modal input:focus-visible{outline:3px solid #2b6cb0;outline-offset:2px}
+  .modal .err{color:#a4510a;font-size:13px;min-height:18px;margin-top:6px}
+  .modal .row{display:flex;gap:8px;margin-top:6px}
+  .modal .row .btn{flex:1 1 0;padding:14px 6px;font-size:15px}
   [hidden]{display:none!important}
   @media (prefers-reduced-motion:no-preference){.type{transition:background .12s}}
 </style>
@@ -121,6 +131,19 @@
   <ul id="list" aria-label="Logged pins"></ul>
 </section>
 
+<div id="countModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="cmTitle">
+  <form class="card" id="cmForm" autocomplete="off" novalidate>
+    <h2 id="cmTitle">How many tires?</h2>
+    <p>Count the tires in this pile.</p>
+    <input id="cmInput" type="text" inputmode="numeric" pattern="[0-9]*" enterkeyhint="done" maxlength="5" aria-label="Number of tires" autocomplete="off">
+    <div id="cmErr" class="err" role="alert"></div>
+    <div class="row">
+      <button type="button" class="btn quiet" id="cmCancel">Cancel</button>
+      <button type="button" class="btn" id="cmUnknown">Not sure</button>
+      <button type="submit" class="btn solid">Save</button>
+    </div>
+  </form>
+</div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 (function(){
@@ -400,25 +423,41 @@
     },function(){ setStatus("Couldn't read that photo.",true); });
   });
 
-  // Tire piles: ask how many. Returns null to cancel, "" for unknown, else a whole number.
-  function askCount(def){
-    for (;;){
-      var v = window.prompt("How many tires are in this pile? (Leave blank if unsure)", def==null?"":def);
-      if (v === null) return null;
-      v = v.trim();
-      if (v === "") return "";
-      if (/^\d{1,5}$/.test(v)) return parseInt(v,10);
-      window.alert("Please enter a whole number, like 12.");
-    }
+  // Tire piles: ask how many with a number-pad dialog. cb gets null (cancelled), "" (not sure) or a whole number.
+  // Must be called straight from a tap so the phone opens the keypad.
+  var cm = document.getElementById("countModal"), cmInput = document.getElementById("cmInput"), cmErr = document.getElementById("cmErr");
+  var cmDone = null;
+  function askCount(def,cb){
+    cmDone = function(v){ cm.hidden = true; cmDone = null; cb(v); };
+    cmInput.value = def==null||def==="" ? "" : String(def);
+    cmErr.textContent = ""; cm.hidden = false;
+    cmInput.focus(); cmInput.select();
   }
+  document.getElementById("cmForm").addEventListener("submit",function(e){
+    e.preventDefault();
+    var v = cmInput.value.trim();
+    if (v === ""){ cmErr.textContent = "Enter a number, or tap Not sure."; return; }
+    if (!/^\d{1,5}$/.test(v)){ cmErr.textContent = "Numbers only, like 12."; return; }
+    cmDone && cmDone(parseInt(v,10));
+  });
+  document.getElementById("cmUnknown").addEventListener("click",function(){ cmDone && cmDone(""); });
+  document.getElementById("cmCancel").addEventListener("click",function(){ cmDone && cmDone(null); });
+  document.addEventListener("keydown",function(e){ if (e.key==="Escape" && !cm.hidden && cmDone) cmDone(null); });
   function countLabel(p){ return p.type==="tires" ? (p.count===""||p.count==null ? "count unknown" : p.count+(p.count===1?" tire":" tires")) : ""; }
 
   // Log a pin
   var holdStatus = 0, waitingFix = null, MAX_ACC = 20; // metres: pins must be at least this accurate
   var goBtn = document.getElementById("go");
   goBtn.addEventListener("click",function(){
-    var count = null, type = current;
-    if (type === "tires"){ count = askCount(); if (count === null){ setStatus("Cancelled. No pin logged."); return; } }
+    var type = current;
+    if (type === "tires"){
+      askCount(null,function(count){
+        if (count === null){ setStatus("Cancelled. No pin logged."); return; }
+        startLog(type,count);
+      });
+    } else startLog(type,null);
+  });
+  function startLog(type,count){
     goBtn.disabled = true; goBtn.textContent = "Getting exact location…";
     var finished = false, timer = null;
     function done(){ finished = true; waitingFix = null; clearTimeout(timer); goBtn.disabled = false; goBtn.textContent = "Log pin at my location"; }
@@ -464,7 +503,7 @@
       waitingFix = null;
       fail(err.code===1?"Location is blocked. Allow location for this site.":"Couldn't get your location. Try again in a moment.");
     },{enableHighAccuracy:true,maximumAge:0,timeout:25000});
-  });
+  }
 
   // List
   var listEl = document.getElementById("list"), countsEl = document.getElementById("counts");
@@ -514,8 +553,7 @@
     var cid = e.target.getAttribute("data-count");
     if (cid){
       var cp = pins.filter(function(p){return p.id===cid;})[0];
-      var nv = askCount(cp.count);
-      if (nv !== null){ cp.count = nv; save(); render(); }
+      askCount(cp.count,function(nv){ if (nv !== null){ cp.count = nv; save(); render(); } });
       return;
     }
     var btn = e.target.closest("[data-photo]");
