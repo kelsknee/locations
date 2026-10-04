@@ -125,7 +125,6 @@
       <button id="copy" class="btn">Copy addresses</button>
       <button id="csv" class="btn solid">Export CSV</button>
       <button id="zip" class="btn">Photos ZIP</button>
-      <button id="clear" class="btn quiet">Clear</button>
     </div>
   </div>
   <ul id="list" aria-label="Logged pins"></ul>
@@ -183,10 +182,6 @@
   function delPhoto(id){
     if (photoURLs[id]){ URL.revokeObjectURL(photoURLs[id]); delete photoURLs[id]; }
     return tx("readwrite",function(s){ return s.delete(id); });
-  }
-  function clearPhotos(){
-    Object.keys(photoURLs).forEach(function(k){ URL.revokeObjectURL(photoURLs[k]); }); photoURLs = {};
-    return tx("readwrite",function(s){ return s.clear(); });
   }
   // Shrink phone photos (often 4-12 MB) to ~1600px JPEG so dozens of pins fit.
   function shrink(file){
@@ -632,13 +627,6 @@
     (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject()).then(function(){
       setStatus("Copied "+pins.length+" addresses.");
     },function(){ window.prompt("Copy these addresses:",text); });
-  });
-  document.getElementById("clear").addEventListener("click",function(){
-    if (!pins.length) return;
-    if (confirm("Delete all "+pins.length+" pins? Export first if you need them.")){
-      Object.keys(markers).forEach(function(id){ map.removeLayer(markers[id]); });
-      markers = {}; pins = []; clearPhotos(); save(); render();
-    }
   });
 
   // Boot
