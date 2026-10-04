@@ -388,23 +388,36 @@
     var count = null, type = current;
     if (type === "tires"){ count = askCount(); if (count === null){ setStatus("Cancelled. No pin logged."); return; } }
     goBtn.disabled = true; goBtn.textContent = "Getting exact location…";
-    navigator.geolocation.getCurrentPosition(function(pos){
-      var p = {id:Date.now().toString(36)+Math.random().toString(36).slice(2,5),
-        type:type,lat:pos.coords.latitude,lng:pos.coords.longitude,
-        acc:Math.round(pos.coords.accuracy),time:new Date().toISOString(),address:"",addrPending:true};
-      if (type === "tires") p.count = count;
-      var shot = staged; staged = null; showStage();
-      if (shot){ p.hasPhoto = true; putPhoto(p.id,shot).then(function(ok){
-        if (!ok){ p.hasPhoto = false; save(); setStatus("Pin saved, but the photo couldn't be stored.",true); }
-        render(); }); }
-      pins.push(p); save(); addMarker(p); map.panTo([p.lat,p.lng]); render(); geocode(p);
-      if (navigator.vibrate) navigator.vibrate(40);
+    var finished = false, timer = null;
+    function done(){ finished = true; clearTimeout(timer); goBtn.disabled = false; goBtn.textContent = "Log pin at my location"; }
+    function fail(msg){ if (finished) return; setStatus(msg,true); done(); }
+    function log(pos){
+      if (finished) return;
+      try {
+        var p = {id:Date.now().toString(36)+Math.random().toString(36).slice(2,5),
+          type:type,lat:pos.coords.latitude,lng:pos.coords.longitude,
+          acc:Math.round(pos.coords.accuracy),time:new Date().toISOString(),address:"",addrPending:true};
+        if (type === "tires") p.count = count;
+        var shot = staged; staged = null; showStage();
+        if (shot){ p.hasPhoto = true; putPhoto(p.id,shot).then(function(ok){
+          if (!ok){ p.hasPhoto = false; save(); setStatus("Pin saved, but the photo couldn't be stored.",true); }
+          render(); }); }
+        pins.push(p); save(); addMarker(p); map.panTo([p.lat,p.lng]); render(); geocode(p);
+        if (navigator.vibrate) navigator.vibrate(40);
+        setStatus("Pin logged.");
+      } catch(e){ setStatus("Something went wrong saving that pin. Try again.",true); }
       done();
-    },function(err){
-      setStatus(err.code===1?"Location is blocked. Allow location for this site.":"Couldn't get your location. Try again in a moment.",true);
-      done();
-    },{enableHighAccuracy:true,maximumAge:0,timeout:20000});
-    function done(){ goBtn.disabled = false; goBtn.textContent = "Log pin at my location"; }
+    }
+    // Use the live GPS fix if it's fresh (instant, and what the blue dot shows); otherwise ask once more.
+    // Phones can leave a location request hanging forever, so never wait more than 12 s.
+    if (lastFix && Date.now()-lastFix.timestamp < 10000){ log(lastFix); return; }
+    timer = setTimeout(function(){
+      if (lastFix && Date.now()-lastFix.timestamp < 120000) log(lastFix);
+      else fail("Couldn't get a GPS fix. Move into the open, check that Location is allowed, and try again.");
+    },12000);
+    navigator.geolocation.getCurrentPosition(log,function(err){
+      fail(err.code===1?"Location is blocked. Allow location for this site.":"Couldn't get your location. Try again in a moment.");
+    },{enableHighAccuracy:true,maximumAge:5000,timeout:10000});
   });
 
   // List
