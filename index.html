@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Site Pin Logger</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root{
+    --ink:#1b2329; --paper:#f6f5f1; --line:#d9d6cc; --muted:#5e6a72;
+    --brush:#2e7d4f; --trash:#d9822b; --tires:#2b2f36; --go:#1b2329;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:var(--ink);background:var(--paper);
+    display:flex;flex-direction:column;-webkit-tap-highlight-color:transparent}
+  #map{flex:1 1 auto;min-height:0;background:#e6e3da}
+  .panel{flex:0 0 auto;background:var(--paper);border-top:1px solid var(--line);
+    padding:12px 12px calc(12px + env(safe-area-inset-bottom,0px));max-height:52vh;display:flex;flex-direction:column;gap:10px}
+  .types{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+  .type{appearance:none;border:2px solid var(--line);background:#fff;border-radius:12px;padding:10px 4px;
+    font:600 15px/1.1 inherit;color:var(--ink);display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer}
+  .type svg{width:30px;height:30px}
+  .type[aria-pressed="true"]{color:#fff;border-color:transparent}
+  .type[data-t="brush"][aria-pressed="true"]{background:var(--brush)}
+  .type[data-t="trash"][aria-pressed="true"]{background:var(--trash)}
+  .type[data-t="tires"][aria-pressed="true"]{background:var(--tires)}
+  .type:focus-visible,.go:focus-visible,.btn:focus-visible{outline:3px solid #2b6cb0;outline-offset:2px}
+  .go{appearance:none;border:0;border-radius:14px;background:var(--go);color:#fff;font:700 19px/1 inherit;
+    padding:17px;width:100%;cursor:pointer}
+  .go:disabled{opacity:.55}
+  .status{font-size:13px;color:var(--muted);min-height:18px}
+  .status.warn{color:#a4510a}
+  .bar{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .counts{font-size:14px;font-weight:600}
+  .actions{display:flex;gap:6px}
+  .btn{appearance:none;border:1.5px solid var(--ink);background:transparent;color:var(--ink);border-radius:10px;
+    padding:8px 12px;font:600 14px/1 inherit;cursor:pointer}
+  .btn.solid{background:var(--ink);color:#fff}
+  .btn.quiet{border-color:var(--line);color:var(--muted)}
+  ul{list-style:none;margin:0;padding:0;overflow:auto;flex:1 1 auto;min-height:0;border-top:1px solid var(--line)}
+  li{display:flex;align-items:center;gap:10px;padding:9px 2px;border-bottom:1px solid var(--line);font-size:14px}
+  li .dot{flex:0 0 14px;height:14px;border-radius:50%}
+  li .txt{flex:1 1 auto;min-width:0}
+  li .addr{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  li .meta{font-size:12px;color:var(--muted)}
+  li button{appearance:none;border:0;background:none;color:var(--muted);font-size:20px;padding:4px 8px;cursor:pointer}
+  .empty{padding:14px 2px;font-size:14px;color:var(--muted)}
+  .pin{width:32px;height:32px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);border:2px solid #fff;
+    box-shadow:0 1px 4px rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center}
+  .pin svg{transform:rotate(45deg);width:16px;height:16px}
+  .me{width:16px;height:16px;border-radius:50%;background:#2b6cb0;border:3px solid #fff;box-shadow:0 0 0 2px rgba(43,108,176,.35)}
+  @media (prefers-reduced-motion:no-preference){.type{transition:background .12s}}
+</style>
+</head>
+<body>
+<div id="map" role="application" aria-label="Map of logged pins"></div>
+
+<section class="panel">
+  <div class="types" role="group" aria-label="Pin type">
+    <button class="type" data-t="brush" aria-pressed="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 21c0-6 1-10 3-14M12 21V4M19 21c0-6-1-10-3-14"/></svg>Brush</button>
+    <button class="type" data-t="trash" aria-pressed="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14M10 11v6M14 11v6"/></svg>Trash</button>
+    <button class="type" data-t="tires" aria-pressed="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5"/></svg>Tires</button>
+  </div>
+
+  <button id="go" class="go">Log pin at my location</button>
+  <div id="status" class="status" role="status" aria-live="polite">Waiting for GPS…</div>
+
+  <div class="bar">
+    <div id="counts" class="counts">0 pins</div>
+    <div class="actions">
+      <button id="copy" class="btn">Copy addresses</button>
+      <button id="csv" class="btn solid">Export CSV</button>
+      <button id="clear" class="btn quiet">Clear</button>
+    </div>
+  </div>
+  <ul id="list" aria-label="Logged pins"></ul>
+</section>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+(function(){
+  var TYPES = {
+    brush:{label:"Brush",color:"#2e7d4f",svg:'<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"><path d="M5 21c0-6 1-10 3-14M12 21V4M19 21c0-6-1-10-3-14"/></svg>'},
+    trash:{label:"Trash",color:"#d9822b",svg:'<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14"/></svg>'},
+    tires:{label:"Tires",color:"#2b2f36",svg:'<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></svg>'}
+  };
+  var KEY = "sitePinLogger.v1";
+  var pins = [];
+  var current = "brush";
+  var lastFix = null;
+
+  try { pins = JSON.parse(localStorage.getItem(KEY) || "[]"); } catch(e){ pins = []; }
+  function save(){ try { localStorage.setItem(KEY, JSON.stringify(pins)); } catch(e){} }
+
+  var map = L.map("map",{zoomControl:true}).setView([42.3314,-83.0458],13);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,
+    attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(map);
+
+  var markers = {};
+  var meMarker = null, meCircle = null;
+
+  function pinIcon(t){
+    return L.divIcon({className:"",iconSize:[32,32],iconAnchor:[16,32],
+      html:'<div class="pin" style="background:'+TYPES[t].color+'">'+TYPES[t].svg+'</div>'});
+  }
+  function addMarker(p){
+    var m = L.marker([p.lat,p.lng],{icon:pinIcon(p.type)}).addTo(map);
+    m.bindPopup(function(){ return "<b>"+TYPES[p.type].label+"</b><br>"+esc(p.address||fmtCoord(p)); });
+    markers[p.id] = m;
+  }
+  function esc(s){ return String(s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];}); }
+  function fmtCoord(p){ return p.lat.toFixed(6)+", "+p.lng.toFixed(6); }
+
+  // Live location
+  var statusEl = document.getElementById("status");
+  function setStatus(msg,warn){ statusEl.textContent = msg; statusEl.className = "status"+(warn?" warn":""); }
+
+  if (!("geolocation" in navigator)) {
+    setStatus("This browser has no location access.",true);
+    document.getElementById("go").disabled = true;
+  } else {
+    var first = true;
+    navigator.geolocation.watchPosition(function(pos){
+      lastFix = pos;
+      var ll = [pos.coords.latitude,pos.coords.longitude];
+      if (!meMarker){
+        meMarker = L.marker(ll,{icon:L.divIcon({className:"",html:'<div class="me"></div>',iconSize:[16,16],iconAnchor:[8,8]}),interactive:false,zIndexOffset:-100}).addTo(map);
+        meCircle = L.circle(ll,{radius:pos.coords.accuracy,color:"#2b6cb0",weight:1,fillOpacity:.08,interactive:false}).addTo(map);
+      } else { meMarker.setLatLng(ll); meCircle.setLatLng(ll).setRadius(pos.coords.accuracy); }
+      if (first){ map.setView(ll,18); first = false; }
+      var a = Math.round(pos.coords.accuracy);
+      setStatus("GPS ready, accurate to about "+a+" m"+(a>30?". Move into the open for a better fix.":"."), a>30);
+    },function(err){
+      setStatus(err.code===1?"Location is blocked. Allow location for this site in your browser settings.":"Can't get a GPS fix yet.",true);
+    },{enableHighAccuracy:true,maximumAge:2000,timeout:20000});
+  }
+
+  // Type picker
+  var typeBtns = document.querySelectorAll(".type");
+  typeBtns.forEach(function(b){
+    b.addEventListener("click",function(){
+      current = b.dataset.t;
+      typeBtns.forEach(function(x){ x.setAttribute("aria-pressed", x===b ? "true":"false"); });
+    });
+  });
+
+  // Reverse geocode (queued, 1 request/sec per Nominatim policy)
+  var queue = [], working = false;
+  function geocode(p){
+    if (queue.indexOf(p.id)===-1) queue.push(p.id);
+    if (!working) runQueue();
+  }
+  function runQueue(){
+    working = true;
+    var id = queue.shift();
+    var p = pins.filter(function(x){return x.id===id;})[0];
+    if (!p){ working = queue.length>0; if (working) runQueue(); return; }
+    fetch("https://nominatim.openstreetmap.org/reverse?format=jsonv2&addressdetails=1&zoom=18&lat="+p.lat+"&lon="+p.lng,{headers:{"Accept":"application/json"}})
+      .then(function(r){ if(!r.ok) throw new Error("http"); return r.json(); })
+      .then(function(j){
+        var a = j.address || {};
+        var street = [a.house_number,a.road].filter(Boolean).join(" ");
+        var city = a.city||a.town||a.village||a.hamlet||"";
+        var place = street||a.neighbourhood||a.suburb||"";
+        if (!p.edited){
+          if (a.house_number){ p.addrKind = "Exact"; }
+          else { p.addrKind = "Nearest"; if (a.road) place = "Near "+a.road; else if (place) place = "Near "+place; }
+          var line = [place, city, a.state, a.postcode].filter(Boolean);
+          p.address = line.length ? line.join(", ") : "";
+          if (!p.address){ p.addrKind = "None"; }
+        }
+        p.addrPending = false; save(); render();
+      })
+      .catch(function(){ p.addrPending = true; save(); render(); })
+      .then(function(){
+        setTimeout(function(){ if (queue.length) runQueue(); else working = false; },1100);
+      });
+  }
+
+  // Log a pin
+  var goBtn = document.getElementById("go");
+  goBtn.addEventListener("click",function(){
+    goBtn.disabled = true; goBtn.textContent = "Getting exact location…";
+    navigator.geolocation.getCurrentPosition(function(pos){
+      var p = {id:Date.now().toString(36)+Math.random().toString(36).slice(2,5),
+        type:current,lat:pos.coords.latitude,lng:pos.coords.longitude,
+        acc:Math.round(pos.coords.accuracy),time:new Date().toISOString(),address:"",addrPending:true};
+      pins.push(p); save(); addMarker(p); map.panTo([p.lat,p.lng]); render(); geocode(p);
+      if (navigator.vibrate) navigator.vibrate(40);
+      done();
+    },function(err){
+      setStatus(err.code===1?"Location is blocked. Allow location for this site.":"Couldn't get your location. Try again in a moment.",true);
+      done();
+    },{enableHighAccuracy:true,maximumAge:0,timeout:20000});
+    function done(){ goBtn.disabled = false; goBtn.textContent = "Log pin at my location"; }
+  });
+
+  // List
+  var listEl = document.getElementById("list"), countsEl = document.getElementById("counts");
+  function render(){
+    var c = {brush:0,trash:0,tires:0};
+    pins.forEach(function(p){ c[p.type]++; });
+    countsEl.textContent = pins.length+" pin"+(pins.length===1?"":"s")+
+      (pins.length?" · Brush "+c.brush+" · Trash "+c.trash+" · Tires "+c.tires:"");
+    if (!pins.length){ listEl.innerHTML = '<li class="empty">No pins yet. Pick a type, then tap Log pin.</li>'; return; }
+    listEl.innerHTML = pins.slice().reverse().map(function(p){
+      var t = new Date(p.time).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"});
+      return '<li data-id="'+p.id+'"><span class="dot" style="background:'+TYPES[p.type].color+'"></span>'+
+        '<div class="txt"><div class="addr">'+esc(p.address||(p.addrPending?"Finding address…":fmtCoord(p)))+'</div>'+
+        '<div class="meta">'+TYPES[p.type].label+' · '+t+' · ±'+p.acc+' m</div>'+
+        '<div class="meta">'+fmtCoord(p)+(p.addrKind==="Nearest"?" · no street number":"")+'</div></div>'+
+        '<button aria-label="Edit address" data-edit="'+p.id+'">&#9998;</button>'+
+        '<button aria-label="Delete pin" data-del="'+p.id+'">&times;</button></li>';
+    }).join("");
+  }
+  listEl.addEventListener("click",function(e){
+    var eid = e.target.getAttribute("data-edit");
+    if (eid){
+      var ep = pins.filter(function(p){return p.id===eid;})[0];
+      var v = window.prompt("Address or landmark for this pin (e.g. \"I-94 service drive, east of Conant\"):", ep.address||"");
+      if (v !== null){ ep.address = v.trim(); ep.edited = !!ep.address; ep.addrKind = ep.address ? "Edited" : "None"; save(); render(); }
+      return;
+    }
+    var id = e.target.getAttribute("data-del");
+    if (id){
+      pins = pins.filter(function(p){return p.id!==id;});
+      if (markers[id]){ map.removeLayer(markers[id]); delete markers[id]; }
+      save(); render(); return;
+    }
+    var li = e.target.closest("li[data-id]");
+    if (li && markers[li.dataset.id]){ var m = markers[li.dataset.id]; map.setView(m.getLatLng(),18); m.openPopup(); }
+  });
+
+  // Export
+  function csvCell(v){ v = String(v==null?"":v); return /[",\n]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v; }
+  document.getElementById("csv").addEventListener("click",function(){
+    if (!pins.length){ setStatus("Log at least one pin first.",true); return; }
+    var rows = [["Type","Address","Address quality","Latitude","Longitude","Accuracy (m)","Logged at","Map link"]];
+    pins.forEach(function(p){ rows.push([TYPES[p.type].label,p.address||"",p.addrKind||(p.address?"":"None"),p.lat.toFixed(6),p.lng.toFixed(6),p.acc,p.time,"https://www.google.com/maps?q="+p.lat.toFixed(6)+","+p.lng.toFixed(6)]); });
+    var csv = rows.map(function(r){return r.map(csvCell).join(",");}).join("\r\n");
+    var blob = new Blob(["\ufeff"+csv],{type:"text/csv;charset=utf-8"});
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "site-pins-"+new Date().toISOString().slice(0,10)+".csv";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function(){ URL.revokeObjectURL(a.href); },2000);
+    setStatus("Exported "+pins.length+" pins. Every row has lat/long and a map link, even where there's no street address.");
+  });
+  document.getElementById("copy").addEventListener("click",function(){
+    if (!pins.length){ setStatus("Log at least one pin first.",true); return; }
+    var text = pins.map(function(p){ return TYPES[p.type].label+": "+(p.address?p.address+" ("+fmtCoord(p)+")":fmtCoord(p)); }).join("\n");
+    (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject()).then(function(){
+      setStatus("Copied "+pins.length+" addresses.");
+    },function(){ window.prompt("Copy these addresses:",text); });
+  });
+  document.getElementById("clear").addEventListener("click",function(){
+    if (!pins.length) return;
+    if (confirm("Delete all "+pins.length+" pins? Export first if you need them.")){
+      Object.keys(markers).forEach(function(id){ map.removeLayer(markers[id]); });
+      markers = {}; pins = []; save(); render();
+    }
+  });
+
+  // Boot
+  pins.forEach(function(p){ addMarker(p); if (!p.address) geocode(p); });
+  if (pins.length) map.fitBounds(L.latLngBounds(pins.map(function(p){return [p.lat,p.lng];})),{maxZoom:17,padding:[30,30]});
+  render();
+  setTimeout(function(){ map.invalidateSize(); },300);
+})();
+</script>
+</body>
+</html>
