@@ -217,7 +217,7 @@
       } else { meMarker.setLatLng(ll); meCircle.setLatLng(ll).setRadius(pos.coords.accuracy); }
       if (first){ map.setView(ll,18); first = false; }
       var a = Math.round(pos.coords.accuracy);
-      setStatus("GPS ready, accurate to about "+a+" m"+(a>30?". Move into the open for a better fix.":"."), a>30);
+      if (!waitingFix && Date.now()>holdStatus) setStatus("GPS ready, accurate to about "+a+" m"+(a>30?". Move into the open for a better fix.":"."), a>30);
     },function(err){
       setStatus(err.code===1?"Location is blocked. Allow location for this site in your browser settings.":"Can't get a GPS fix yet.",true);
     },{enableHighAccuracy:true,maximumAge:2000,timeout:20000});
@@ -384,7 +384,7 @@
   function countLabel(p){ return p.type==="tires" ? (p.count===""||p.count==null ? "count unknown" : p.count+(p.count===1?" tire":" tires")) : ""; }
 
   // Log a pin
-  var waitingFix = null;
+  var holdStatus = 0, waitingFix = null, MAX_ACC = 20; // metres: pins must be at least this accurate
   var goBtn = document.getElementById("go");
   goBtn.addEventListener("click",function(){
     var count = null, type = current;
@@ -392,7 +392,7 @@
     goBtn.disabled = true; goBtn.textContent = "Getting exact location…";
     var finished = false, timer = null;
     function done(){ finished = true; waitingFix = null; clearTimeout(timer); goBtn.disabled = false; goBtn.textContent = "Log pin at my location"; }
-    function fail(msg){ if (finished) return; setStatus(msg,true); done(); }
+    function fail(msg){ if (finished) return; setStatus(msg,true); holdStatus = Date.now()+15000; done(); }
     function log(pos){
       if (finished) return;
       try {
@@ -413,18 +413,27 @@
     // Only ever log a fix taken after the tap: a live fix from the last 3 s, else the next fix
     // that arrives (from the continuous GPS watch or a fresh request). Never reuse an old location.
     var tapped = Date.now();
+    var best = null;
     function fresh(pos){ return pos && pos.timestamp >= tapped-3000; }
-    function take(pos){ if (!fresh(pos)) return; waitingFix = null; log(pos); }
-    if (fresh(lastFix)){ log(lastFix); return; }
+    function good(pos){ return fresh(pos) && pos.coords.accuracy <= MAX_ACC; }
+    function take(pos){
+      if (!fresh(pos)) return;
+      if (!best || pos.coords.accuracy < best) best = pos.coords.accuracy;
+      if (!good(pos)){ setStatus("Waiting for a more accurate GPS fix (now ±"+Math.round(pos.coords.accuracy)+" m, need ±"+MAX_ACC+" m or better)…",true); return; }
+      waitingFix = null; log(pos);
+    }
+    if (good(lastFix)){ log(lastFix); return; }
     waitingFix = take;
     timer = setTimeout(function(){
       waitingFix = null;
-      fail("No fresh GPS fix yet, so nothing was logged. Move into the open and tap again.");
-    },15000);
+      fail(best ? "Nothing logged: GPS was only accurate to ±"+Math.round(best)+" m (need ±"+MAX_ACC+" m or better). Move into the open and tap again."
+                : "No fresh GPS fix yet, so nothing was logged. Move into the open and tap again.");
+    },25000);
     navigator.geolocation.getCurrentPosition(take,function(err){
+      if (err.code!==1) return; // a timeout here is fine; the live GPS watch and the 25 s limit decide
       waitingFix = null;
       fail(err.code===1?"Location is blocked. Allow location for this site.":"Couldn't get your location. Try again in a moment.");
-    },{enableHighAccuracy:true,maximumAge:0,timeout:15000});
+    },{enableHighAccuracy:true,maximumAge:0,timeout:25000});
   });
 
   // List
@@ -442,7 +451,7 @@
         : '<button class="thumb none" aria-label="Add photo" data-photo="'+p.id+'">'+CAM+'</button>';
       return '<li data-id="'+p.id+'">'+th+'<span class="dot" style="background:'+TYPES[p.type].color+'"></span>'+
         '<div class="txt"><div class="addr">'+esc(p.address||(p.addrPending?"Finding address…":fmtCoord(p)))+'</div>'+
-        '<div class="meta">'+TYPES[p.type].label+(p.type==="tires"?' · <button class="lnk" data-count="'+p.id+'" aria-label="Edit tire count">'+countLabel(p)+'</button>':'')+' · '+t+' · ±'+p.acc+' m</div>'+
+        '<div class="meta">'+TYPES[p.type].label+(p.type==="tires"?' · <button class="lnk" data-count="'+p.id+'" aria-label="Edit tire count">'+countLabel(p)+'</button>':'')+' · '+t+' · '+(p.acc>MAX_ACC?'<b style="color:#a4510a">±'+p.acc+' m, weak GPS: recheck</b>':'±'+p.acc+' m')+'</div>'+
         '<div class="meta">'+fmtCoord(p)+(p.addrKind==="Nearest"?" · no street number":"")+'</div></div>'+
         '<button aria-label="Replace photo" data-photo="'+p.id+'"'+(photoURLs[p.id]?'':' hidden')+'>'+CAM+'</button>'+
         '<button aria-label="Edit address" data-edit="'+p.id+'">&#9998;</button>'+
