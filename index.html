@@ -59,6 +59,9 @@
   li .thumb.none{display:flex;align-items:center;justify-content:center;color:var(--muted);border-style:dashed}
   li .thumb svg{width:20px;height:20px}
   .popimg{display:block;width:200px;max-width:100%;border-radius:6px;margin-top:6px}
+  .trackrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .btn.rec[aria-pressed="true"]{background:#c0392b;border-color:#c0392b;color:#fff}
+  .trackrow .info{font-size:13px;color:var(--muted);flex:1 1 auto;min-width:90px}
   [hidden]{display:none!important}
   @media (prefers-reduced-motion:no-preference){.type{transition:background .12s}}
 </style>
@@ -74,6 +77,13 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14M10 11v6M14 11v6"/></svg>Trash</button>
     <button class="type" data-t="tires" aria-pressed="false">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5"/></svg>Tires</button>
+  </div>
+
+  <div class="trackrow">
+    <button id="track" class="btn rec" type="button" aria-pressed="false">Start tracking drive</button>
+    <span id="trackinfo" class="info">No route yet.</span>
+    <button id="gpx" class="btn quiet" type="button" hidden>GPX</button>
+    <button id="cleartrack" class="btn quiet" type="button" hidden>Clear route</button>
   </div>
 
   <div class="snaprow">
@@ -197,6 +207,7 @@
     var first = true;
     navigator.geolocation.watchPosition(function(pos){
       lastFix = pos;
+      onFix(pos);
       var ll = [pos.coords.latitude,pos.coords.longitude];
       if (!meMarker){
         meMarker = L.marker(ll,{icon:L.divIcon({className:"",html:'<div class="me"></div>',iconSize:[16,16],iconAnchor:[8,8]}),interactive:false,zIndexOffset:-100}).addTo(map);
@@ -208,6 +219,84 @@
     },function(err){
       setStatus(err.code===1?"Location is blocked. Allow location for this site in your browser settings.":"Can't get a GPS fix yet.",true);
     },{enableHighAccuracy:true,maximumAge:2000,timeout:20000});
+  }
+
+  // Drive tracking: records the route as line segments (a new segment each time tracking starts)
+  var TKEY = "sitePinLogger.track.v1";
+  var track = {on:false,segs:[]};
+  try { var t0 = JSON.parse(localStorage.getItem(TKEY)||"null"); if (t0 && t0.segs) track = t0; } catch(e){}
+  function saveTrack(){ try { localStorage.setItem(TKEY,JSON.stringify(track)); } catch(e){} }
+  var trackLine = L.polyline(track.segs.map(function(sg){return sg.map(function(q){return [q[0],q[1]];});}),
+    {color:"#2b6cb0",weight:5,opacity:.8,lineJoin:"round",interactive:false}).addTo(map);
+  var trackBtn = document.getElementById("track"), trackInfo = document.getElementById("trackinfo");
+  function dist(a,b){ // metres, haversine
+    var R=6371000,r=Math.PI/180,dl=(b[0]-a[0])*r,dn=(b[1]-a[1])*r;
+    var h=Math.sin(dl/2)*Math.sin(dl/2)+Math.cos(a[0]*r)*Math.cos(b[0]*r)*Math.sin(dn/2)*Math.sin(dn/2);
+    return 2*R*Math.asin(Math.sqrt(h));
+  }
+  function trackMeters(){
+    var m=0; track.segs.forEach(function(sg){ for(var i=1;i<sg.length;i++) m+=dist(sg[i-1],sg[i]); }); return m;
+  }
+  function renderTrack(){
+    var n = track.segs.reduce(function(a,sg){return a+sg.length;},0);
+    trackBtn.setAttribute("aria-pressed",track.on?"true":"false");
+    trackBtn.textContent = track.on ? "Stop tracking" : (n ? "Resume tracking" : "Start tracking drive");
+    trackInfo.textContent = track.on || n ? (trackMeters()/1609.344).toFixed(2)+" mi driven"+(track.on?" · recording":"") : "No route yet.";
+    document.getElementById("gpx").hidden = document.getElementById("cleartrack").hidden = !n;
+    trackLine.setLatLngs(track.segs.map(function(sg){return sg.map(function(q){return [q[0],q[1]];});}));
+  }
+  function onFix(pos){
+    if (!track || !track.on) return;
+    if (pos.coords.accuracy > 50) return;               // ignore poor fixes so the line doesn't jump
+    var sg = track.segs[track.segs.length-1];
+    if (!sg){ sg = []; track.segs.push(sg); }
+    var q = [+pos.coords.latitude.toFixed(6),+pos.coords.longitude.toFixed(6),pos.timestamp||Date.now()];
+    var last = sg[sg.length-1];
+    if (last && dist(last,q) < Math.max(5, Math.min(pos.coords.accuracy,15)/2)) return; // skip standing still / GPS drift
+    sg.push(q); saveTrack(); renderTrack();
+  }
+  var wake = null;
+  function holdScreen(){
+    if (!track.on || !navigator.wakeLock || wake) return;
+    navigator.wakeLock.request("screen").then(function(w){ wake = w; w.addEventListener("release",function(){ wake = null; }); },function(){});
+  }
+  document.addEventListener("visibilitychange",function(){ if (!document.hidden) holdScreen(); });
+  trackBtn.addEventListener("click",function(){
+    track.on = !track.on;
+    if (track.on){
+      track.segs.push([]);
+      if (lastFix) onFix(lastFix);
+      holdScreen();
+      setStatus("Tracking your drive. Keep this page open and the screen on, or your phone may pause GPS.");
+    } else {
+      if (wake){ wake.release(); wake = null; }
+      track.segs = track.segs.filter(function(sg){return sg.length;});
+      setStatus("Tracking stopped.");
+    }
+    saveTrack(); renderTrack();
+    if (track.on) trackBtn.blur();
+  });
+  document.getElementById("cleartrack").addEventListener("click",function(){
+    if (confirm("Delete the recorded route? Export the GPX first if you need it.")){
+      track = {on:false,segs:[]}; if (wake){ wake.release(); wake = null; } saveTrack(); renderTrack();
+    }
+  });
+  document.getElementById("gpx").addEventListener("click",function(){
+    var x = '<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="Site Pin Logger" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>Drive '+new Date().toISOString().slice(0,10)+'</name>';
+    track.segs.forEach(function(sg){
+      x += "<trkseg>"+sg.map(function(q){ return '<trkpt lat="'+q[0]+'" lon="'+q[1]+'"><time>'+new Date(q[2]).toISOString()+'</time></trkpt>'; }).join("")+"</trkseg>";
+    });
+    x += "</trk></gpx>";
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([x],{type:"application/gpx+xml"}));
+    a.download = "drive-"+new Date().toISOString().slice(0,10)+".gpx";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function(){ URL.revokeObjectURL(a.href); },2000);
+  });
+  function fitAll(){
+    var pts = []; track.segs.forEach(function(sg){ sg.forEach(function(q){ pts.push([q[0],q[1]]); }); });
+    pins.forEach(function(p){ pts.push([p.lat,p.lng]); });
+    return pts;
   }
 
   // Type picker
@@ -426,7 +515,9 @@
     return getPhoto(p.id).then(function(b){ if (b && b.size) photoURLs[p.id] = URL.createObjectURL(b); });
   })).then(function(){ render(); });
   pins.forEach(function(p){ addMarker(p); if (!p.address) geocode(p); });
-  if (pins.length) map.fitBounds(L.latLngBounds(pins.map(function(p){return [p.lat,p.lng];})),{maxZoom:17,padding:[30,30]});
+  renderTrack(); holdScreen();
+  var allPts = fitAll();
+  if (allPts.length) map.fitBounds(L.latLngBounds(allPts),{maxZoom:17,padding:[30,30]});
   render();
   setTimeout(function(){ map.invalidateSize(); },300);
 })();
