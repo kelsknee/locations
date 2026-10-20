@@ -76,8 +76,26 @@
   .modal .card{background:#fff;border-radius:16px;padding:18px;width:100%;max-width:340px;margin-top:12vh;box-shadow:0 8px 30px rgba(0,0,0,.35)}
   .modal h2{margin:0 0 4px;font-size:18px}
   .modal p{margin:0 0 12px;font-size:14px;color:var(--muted)}
-  .modal input{width:100%;font-family:inherit;font-weight:700;font-size:28px;line-height:1;text-align:center;padding:12px;border:2px solid var(--ink);border-radius:12px;color:var(--ink)}
+  #cmInput{width:100%;font-family:inherit;font-weight:700;font-size:28px;line-height:1;text-align:center;padding:12px;border:2px solid var(--ink);border-radius:12px;color:var(--ink)}
   .modal input:focus-visible{outline:3px solid #2b6cb0;outline-offset:2px}
+  .modal .card.wide{max-width:420px;max-height:80vh;overflow:auto;margin-top:6vh}
+  .modal label{display:block;font-size:13px;font-weight:700;margin:14px 0 6px}
+  #pmName{width:100%;font-family:inherit;font-size:16px;padding:12px;border:2px solid var(--line);border-radius:12px;color:var(--ink)}
+  .pmlist{list-style:none;margin:0;padding:0;display:grid;gap:6px;border:0;overflow:visible}
+  .pmlist li{display:block;padding:0;border:0}
+  .pmitem{appearance:none;width:100%;text-align:left;font-family:inherit;border:2px solid var(--line);background:#fff;border-radius:12px;padding:10px 12px;cursor:pointer;color:var(--ink);display:flex;align-items:center;gap:8px}
+  .pmitem[aria-current="true"]{border-color:var(--ink);background:#f0efe9}
+  .pmitem b{flex:1 1 auto;font-size:15px;overflow-wrap:anywhere}
+  .pmitem span{font-size:12px;color:var(--muted);white-space:nowrap}
+  .projbar{display:flex;align-items:center;gap:8px}
+  .projbtn{appearance:none;flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:8px;text-align:left;font-family:inherit;font-size:15px;border:2px solid var(--ink);background:#fff;color:var(--ink);border-radius:12px;padding:9px 12px;cursor:pointer}
+  .projbtn .lbl{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+  .projbtn b{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .projbtn.none{border-color:#a4510a}
+  .runslink{font-size:13px;font-weight:600;color:#2b6cb0;white-space:nowrap}
+  .newproj{background:#fff7e6;border:1px solid #e3b98a;border-radius:10px;padding:8px 10px;font-size:13px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .newproj span{flex:1 1 140px}
+  .newproj .btn{padding:7px 10px;font-size:13px}
   .modal .err{color:#a4510a;font-size:13px;min-height:18px;margin-top:6px}
   .modal .row{display:flex;gap:8px;margin-top:6px}
   .modal .row .btn{flex:1 1 0;padding:14px 6px;font-size:15px}
@@ -93,6 +111,15 @@
 <div id="map" role="application" aria-label="Map of logged pins"></div>
 
 <section class="panel">
+  <div class="projbar" id="projbar">
+    <button id="projbtn" class="projbtn none" type="button" aria-haspopup="dialog"><span class="lbl">Project</span><b id="projname">Choose a project</b><span aria-hidden="true">&#9662;</span></button>
+    <a class="runslink" href="runs.html">All runs</a>
+  </div>
+  <div id="newproj" class="newproj" hidden>
+    <span id="newprojtxt"></span>
+    <button id="npSwitch" class="btn solid" type="button">Switch</button>
+    <button id="npStay" class="btn quiet" type="button">Stay</button>
+  </div>
   <div class="types" role="group" aria-label="Pin type">
     <button class="type" data-t="brush" aria-pressed="true">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 21c0-6 1-10 3-14M12 21V4M19 21c0-6-1-10-3-14"/></svg>Brush</button>
@@ -135,6 +162,22 @@
   <ul id="list" aria-label="Logged pins"></ul>
 </section>
 
+<div id="projModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="pmTitle">
+  <div class="card wide">
+    <h2 id="pmTitle">Select project</h2>
+    <p>Pins and routes you log go into the project you pick. Earlier projects stay saved.</p>
+    <ul id="pmList" class="pmlist"></ul>
+    <form id="pmForm" autocomplete="off">
+      <label for="pmName">Or make a new project</label>
+      <input id="pmName" type="text" maxlength="60" placeholder="e.g. Oct 2026 east side" enterkeyhint="done">
+      <div id="pmErr" class="err" role="alert"></div>
+      <div class="row">
+        <button type="button" class="btn quiet" id="pmClose">Close</button>
+        <button type="submit" class="btn solid">Create &amp; use</button>
+      </div>
+    </form>
+  </div>
+</div>
 <div id="countModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="cmTitle">
   <form class="card" id="cmForm" autocomplete="off" novalidate>
     <h2 id="cmTitle">How many tires?</h2>
@@ -157,6 +200,11 @@
   var OLD_KEY = "sitePinLogger.v1";   // pins used to live only on the phone; they're moved to the upload queue below
   var pins = [];                      // everything shown: shared pins + pins still waiting to upload
   var serverPins = [], serverSig = "";
+  var projects = [], projectId = SP.configured ? SP.getSelected() : null, projectsLoaded = false;
+  try {                               // the Runs page links here as index.html?project=ID
+    var qp = new URLSearchParams(location.search).get("project");
+    if (qp && SP.configured){ projectId = qp; SP.setSelected(qp); history.replaceState(null,"",location.pathname); }
+  } catch(e){}
   var current = "brush";
   var lastFix = null;
   var statusEl = document.getElementById("status");
@@ -195,7 +243,9 @@
   function buildPins(){
     var out = serverPins.filter(function(p){ return !outbox[p.id]; });
     Object.keys(outbox).forEach(function(id){
-      var it = outbox[id], p = Object.assign({}, it.pin);
+      var it = outbox[id];
+      if ((it.pin.projectId||projectId) !== projectId) return;   // waiting pins from another project stay out of this view
+      var p = Object.assign({}, it.pin);
       p.pending = true; p.localBlob = it.photo || null; out.push(p);
     });
     out.sort(function(a,b){ return a.time<b.time ? -1 : a.time>b.time ? 1 : 0; });
@@ -293,7 +343,7 @@
   // ---- Drive tracking: records the route as line segments (a new segment each time tracking starts).
   // The route is kept on the phone while recording and copied to the shared database every minute and when you stop.
   var TKEY = "sitePinLogger.track.v1";
-  var track = {id:null,on:false,segs:[],dirty:false};
+  var track = {id:null,projectId:null,on:false,segs:[],dirty:false};
   try { var t0 = JSON.parse(localStorage.getItem(TKEY)||"null"); if (t0 && t0.segs) track = t0; } catch(e){}
   function saveTrack(){ try { localStorage.setItem(TKEY,JSON.stringify(track)); } catch(e){} }
   var trackLine = L.polyline([],{color:"#2b6cb0",weight:5,opacity:.8,lineJoin:"round",interactive:false}).addTo(map);
@@ -308,9 +358,9 @@
     trackLine.setLatLngs(track.segs.map(function(sg){return sg.map(function(q){return [q[0],q[1]];});}));
   }
   function syncTrack(){
-    if (!SP.configured || !track.id || !track.dirty || !trackPoints()) return Promise.resolve();
+    if (!SP.configured || !track.id || !track.projectId || !track.dirty || !trackPoints()) return Promise.resolve();
     var n = trackPoints(), started = track.segs[0] && track.segs[0][0] ? new Date(track.segs[0][0][2]).toISOString() : new Date().toISOString();
-    return SP.api.upsertTrack({id:track.id,segs:track.segs,startedAt:started}).then(function(){
+    return SP.api.upsertTrack({id:track.id,projectId:track.projectId,segs:track.segs,startedAt:started}).then(function(){
       if (trackPoints()===n){ track.dirty = false; saveTrack(); }
     },function(){});
   }
@@ -331,9 +381,16 @@
   }
   document.addEventListener("visibilitychange",function(){ if (!document.hidden) holdScreen(); });
   trackBtn.addEventListener("click",function(){
+    if (!track.on){
+      if (needProject()) return;
+      if (trackPoints() && track.projectId && track.projectId!==projectId){
+        setStatus("Your saved route belongs to another project and hasn't uploaded yet. Get some signal first, then try again.",true); return;
+      }
+    }
     track.on = !track.on;
     if (track.on){
-      if (!track.id) track.id = Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+      if (!track.id) track.id = SP.newId();
+      if (!track.projectId) track.projectId = projectId;
       track.segs.push([]);
       if (lastFix) onFix(lastFix);
       holdScreen();
@@ -350,11 +407,11 @@
   });
   document.getElementById("cleartrack").addEventListener("click",function(){
     if (confirm("Clear this route from your screen? "+(SP.configured?"The saved copy stays on the shared data page.":"It has not been uploaded, so export the GPX first if you need it."))){
-      track = {id:null,on:false,segs:[],dirty:false}; if (wake){ wake.release(); wake = null; } saveTrack(); renderTrack();
+      track = {id:null,projectId:null,on:false,segs:[],dirty:false}; if (wake){ wake.release(); wake = null; } saveTrack(); renderTrack();
     }
   });
   document.getElementById("gpx").addEventListener("click",function(){
-    SP.download(new Blob([SP.gpx([{segs:track.segs}])],{type:"application/gpx+xml"}),"drive-"+SP.today()+".gpx");
+    SP.download(new Blob([SP.gpx([{segs:track.segs}])],{type:"application/gpx+xml"}),"drive-"+SP.slug(projName())+"-"+SP.today()+".gpx");
   });
   setInterval(function(){ if (track.on) syncTrack(); },60000);
 
@@ -399,6 +456,109 @@
   });
   function lookupAddress(p){ geoWait[p.id] = true; geocode(p); }
 
+  // ---- Projects (runs) ----
+  var projBtn = document.getElementById("projbtn"), projNameEl = document.getElementById("projname");
+  var pmModal = document.getElementById("projModal"), pmList = document.getElementById("pmList");
+  var pmName = document.getElementById("pmName"), pmErr = document.getElementById("pmErr");
+  function projName(id){ var p = projects.filter(function(x){return x.id===(id||projectId);})[0]; return p ? p.name : ""; }
+  document.getElementById("projbar").hidden = !SP.configured;
+  function renderProj(){
+    var n = projName();
+    projNameEl.textContent = n || (projectId && !projectsLoaded ? "Loading…" : "Choose a project");
+    projBtn.classList.toggle("none",!projectId);
+    renderPmList();
+  }
+  function renderPmList(){
+    var list = projects.slice().reverse();
+    pmList.innerHTML = list.length ? list.map(function(p){
+      var d = new Date(p.createdAt);
+      return '<li><button type="button" class="pmitem" data-pid="'+esc(p.id)+'"'+(p.id===projectId?' aria-current="true"':'')+'><b>'+esc(p.name)+'</b><span>'+
+        (p.id===projectId?'Current · ':'')+d.toLocaleDateString([], {month:"short",day:"numeric",year:"numeric"})+'</span></button></li>';
+    }).join("") : '<li class="empty" style="padding:6px 0;color:#5e6a72;font-size:14px">No projects yet. Make the first one below.</li>';
+  }
+  function openProjects(){
+    renderPmList(); pmErr.textContent = ""; pmName.value = ""; pmModal.hidden = false;
+    if (!projects.length) pmName.focus();
+  }
+  function needProject(){
+    if (!SP.configured || projectId) return false;
+    setStatus("Pick or make a project first, so your pins go in the right run.",true);
+    openProjects(); return true;
+  }
+  projBtn.addEventListener("click",openProjects);
+  document.getElementById("pmClose").addEventListener("click",function(){ pmModal.hidden = true; });
+  document.addEventListener("keydown",function(e){ if (e.key==="Escape" && !pmModal.hidden) pmModal.hidden = true; });
+  pmList.addEventListener("click",function(e){
+    var b = e.target.closest("[data-pid]"); if (!b) return;
+    pmModal.hidden = true; selectProject(b.getAttribute("data-pid"));
+  });
+  document.getElementById("pmForm").addEventListener("submit",function(e){
+    e.preventDefault();
+    var name = pmName.value.trim().replace(/\s+/g," ");
+    if (!name){ pmErr.textContent = "Give the project a name."; return; }
+    if (projects.some(function(p){ return p.name.toLowerCase()===name.toLowerCase(); })){ pmErr.textContent = "A project with that name already exists. Pick it from the list, or use a different name."; return; }
+    pmErr.textContent = "Creating…";
+    var np = {id:SP.newId(),name:name};
+    SP.api.createProject(np).then(function(){
+      projects.push({id:np.id,name:name,createdAt:new Date().toISOString(),archived:false});
+      markSeen(np.id); pmModal.hidden = true; selectProject(np.id);
+      setStatus("Started project “"+name+"”. New pins go into it; earlier projects stay saved.");
+    },function(){ pmErr.textContent = "Couldn't create it. You need signal to start a new project."; });
+  });
+  function stampOrphans(){            // pins queued before projects existed go into the project you're in
+    if (!projectId) return;
+    Object.keys(outbox).forEach(function(id){
+      if (!outbox[id].pin.projectId){ outbox[id].pin.projectId = projectId; obPut(outbox[id]); }
+    });
+  }
+  function selectProject(id){
+    if (id === projectId) return;
+    if (track.on){ track.on = false; if (wake){ wake.release(); wake = null; } track.segs = track.segs.filter(function(sg){return sg.length;}); track.dirty = true; saveTrack(); renderTrack(); }
+    syncTrack().then(function(){            // a finished route belongs to the project it was driven in, so clear it once saved
+      if (!track.dirty && !track.on){ track = {id:null,projectId:null,on:false,segs:[],dirty:false}; saveTrack(); renderTrack(); }
+    });
+    projectId = id; SP.setSelected(id);
+    var nw = SP.newest(projects); if (nw) markSeen(nw.id);   // picking a project on purpose means you've seen the newest one
+    serverPins = []; serverSig = ""; buildPins(); syncMarkers(); stampOrphans(); render(); renderProj(); hideNewProj();
+    refresh().then(function(){
+      var pts = pins.map(function(p){return [p.lat,p.lng];});
+      if (pts.length) map.fitBounds(L.latLngBounds(pts),{maxZoom:17,padding:[30,30]}); follow = false; setFollowUI();
+    });
+  }
+  // A crew-mate starting a new run shouldn't silently leave your phone logging into the old one.
+  var SEEN = "sitePinLogger.seenNewest", npTarget = null;
+  function markSeen(id){ try { localStorage.setItem(SEEN,id); } catch(e){} }
+  function hideNewProj(){ document.getElementById("newproj").hidden = true; npTarget = null; }
+  function checkNewest(){
+    var n = SP.newest(projects), seen = null;
+    try { seen = localStorage.getItem(SEEN); } catch(e){}
+    if (!n) return;
+    if (!projectId || n.id===projectId){ markSeen(n.id); hideNewProj(); return; }
+    if (n.id === seen) return;
+    npTarget = n.id;
+    document.getElementById("newprojtxt").textContent = "A new project was started: “"+n.name+"”. You're still logging into “"+(projName()||"…")+"”.";
+    document.getElementById("newproj").hidden = false;
+  }
+  document.getElementById("npSwitch").addEventListener("click",function(){ if (npTarget) selectProject(npTarget); hideNewProj(); });
+  document.getElementById("npStay").addEventListener("click",function(){ if (npTarget) markSeen(npTarget); hideNewProj(); });
+  function loadProjects(){
+    if (!SP.configured) return Promise.resolve();
+    return SP.api.listProjects().then(function(list){
+      var prev = projects; projects = list; projectsLoaded = true;
+      if (projectId && !projects.some(function(p){return p.id===projectId;})){   // that project was deleted
+        var gonep = prev.filter(function(x){return x.id===projectId;})[0], gone = gonep ? gonep.name : "The project you were logging into";
+        projectId = null; SP.setSelected(null); serverPins = []; serverSig = ""; buildPins(); syncMarkers(); render();
+        var fallback = SP.newest(projects);
+        setStatus("“"+gone+"” was deleted. "+(fallback?"This phone is now logging into “"+fallback.name+"”.":"Pick or make a project to keep logging."),true);
+        holdStatus = Date.now()+20000;
+      }
+      if (!projectId && projects.length){ var n = SP.newest(projects); if (n){ projectId = n.id; SP.setSelected(n.id); markSeen(n.id); stampOrphans(); buildPins(); syncMarkers(); render(); } }
+      renderProj(); checkNewest();
+      if (!projectId && !projects.length && !bootPrompted){ bootPrompted = true; openProjects(); }   // a brand-new site: make the first project
+    },function(){ renderProj(); });
+  }
+  var bootPrompted = false;
+
   // ---- Syncing with the shared database ----
   var syncEl = document.getElementById("sync"), flushing = false;
   function renderSync(){
@@ -410,7 +570,8 @@
   }
   function flush(){
     if (!SP.configured || flushing) return Promise.resolve();
-    var ids = Object.keys(outbox);
+    stampOrphans();
+    var ids = Object.keys(outbox).filter(function(id){ return outbox[id].pin.projectId; });
     if (!ids.length) return Promise.resolve();
     flushing = true;
     function next(i){
@@ -436,14 +597,16 @@
     return next(0).catch(function(){}).then(function(){ flushing = false; buildPins(); syncMarkers(); render(); });
   }
   function refresh(){
-    if (!SP.configured) return Promise.resolve();
-    return SP.api.listPins().then(function(rows){
+    if (!SP.configured || !projectId) return Promise.resolve();
+    var asked = projectId;
+    return SP.api.listPins(projectId).then(function(rows){
+      if (asked !== projectId) return;                           // switched projects while this was loading
       var sig = JSON.stringify(rows);
       if (sig !== serverSig){ serverSig = sig; serverPins = rows; buildPins(); syncMarkers(); render(); }
       else renderSync();
     },function(){ renderSync(); });
   }
-  function syncAll(){ return flush().then(refresh).then(syncTrack); }
+  function syncAll(){ return loadProjects().then(flush).then(refresh).then(syncTrack); }
   setInterval(function(){ if (!document.hidden) syncAll(); },20000);
   window.addEventListener("online",syncAll);
   document.addEventListener("visibilitychange",function(){ if (!document.hidden) syncAll(); });
@@ -507,6 +670,7 @@
   try { lastMine = sessionStorage.getItem("sitePinLogger.lastMine"); } catch(e){}
   goBtn.addEventListener("click",function(){
     var type = current;
+    if (needProject()) return;
     if (type === "tires"){
       askCount(null,function(count){
         if (count === null){ setStatus("Cancelled. No pin logged."); return; }
@@ -515,6 +679,7 @@
     } else startLog(type,null);
   });
   function startLog(type,count){
+    if (needProject()) return;
     goBtn.disabled = true; goBtn.textContent = "Getting exact location…";
     var finished = false, timer = null;
     function done(){ finished = true; waitingFix = null; clearTimeout(timer); goBtn.disabled = false; goBtn.textContent = "Log pin at my location"; }
@@ -525,7 +690,7 @@
         var p = {id:Date.now().toString(36)+Math.random().toString(36).slice(2,5),
           type:type,lat:pos.coords.latitude,lng:pos.coords.longitude,
           acc:Math.round(pos.coords.accuracy),time:new Date().toISOString(),address:"",addrKind:null,edited:false,
-          count:type==="tires"?count:null,photoPath:null};
+          count:type==="tires"?count:null,photoPath:null,projectId:projectId};
         var shot = staged; staged = null; showStage();
         var it = {id:p.id,pin:p,photo:shot||null};
         outbox[p.id] = it; obPut(it);
@@ -628,14 +793,14 @@
   // ---- Export ----
   document.getElementById("csv").addEventListener("click",function(){
     if (!pins.length){ setStatus("Log at least one pin first.",true); return; }
-    SP.download(new Blob([SP.buildCsv(pins)],{type:"text/csv;charset=utf-8"}),"site-pins-"+SP.today()+".csv");
+    SP.download(new Blob([SP.buildCsv(pins)],{type:"text/csv;charset=utf-8"}),"site-pins-"+SP.slug(projName())+"-"+SP.today()+".csv");
     setStatus("Exported "+pins.length+" pins. Every row has lat/long and a map link, even where there's no street address. Use Photos ZIP to get the photos.");
   });
   document.getElementById("zip").addEventListener("click",function(){
     if (!pins.length){ setStatus("Log at least one pin first.",true); return; }
     setStatus("Building ZIP…");
     SP.exportZip(pins).then(function(r){
-      SP.download(r.blob,"site-pins-"+SP.today()+".zip");
+      SP.download(r.blob,"site-pins-"+SP.slug(projName())+"-"+SP.today()+".zip");
       setStatus("Exported ZIP with "+pins.length+" pins and "+r.photos+" photos."+(r.missed?" "+r.missed+" photos couldn't be fetched, so check your signal and try again.":""),!!r.missed);
     });
   });
@@ -695,7 +860,7 @@
     });
     return migrateOld();
   }).then(function(){
-    buildPins(); syncMarkers(); render();
+    buildPins(); syncMarkers(); render(); renderProj();
     pins.forEach(function(p){ if (p.pending && !p.address && p.addrKind!=="None") lookupAddress(p); });
     renderTrack(); holdScreen();
     var pts = []; track.segs.forEach(function(sg){ sg.forEach(function(q){ pts.push([q[0],q[1]]); }); });

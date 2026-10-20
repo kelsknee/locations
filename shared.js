@@ -26,6 +26,16 @@
   SP.segMeters = function(segs){
     var m=0; segs.forEach(function(sg){ for(var i=1;i<sg.length;i++) m+=SP.dist(sg[i-1],sg[i]); }); return m;
   };
+  SP.newId = function(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); };
+  SP.slug = function(name){ return String(name||"").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,40) || "project"; };
+  // Which project this phone is logging into (a small preference stored on the phone)
+  var SEL = "sitePinLogger.project";
+  SP.getSelected = function(){ try { return localStorage.getItem(SEL) || null; } catch(e){ return null; } };
+  SP.setSelected = function(id){ try { if (id) localStorage.setItem(SEL,id); else localStorage.removeItem(SEL); } catch(e){} };
+  SP.newest = function(projects){ // newest non-archived project
+    var live = projects.filter(function(p){return !p.archived;});
+    return live.length ? live[live.length-1] : null;
+  };
   SP.hasPhoto = function(p){ return !!(p.photoPath || p.localBlob); };
 
   // ---- Supabase (plain REST, no SDK) ----
@@ -42,18 +52,18 @@
   function noStore(){ if (!SP.configured) throw new Error("Shared storage isn't set up"); }
   function toRow(p){
     return {id:p.id,type:p.type,lat:p.lat,lng:p.lng,acc:p.acc,logged_at:p.time,address:p.address||"",
-      addr_kind:p.addrKind||null,edited:!!p.edited,tire_count:(p.count===""||p.count==null)?null:p.count,photo_path:p.photoPath||null};
+      addr_kind:p.addrKind||null,edited:!!p.edited,tire_count:(p.count===""||p.count==null)?null:p.count,photo_path:p.photoPath||null,project_id:p.projectId||null};
   }
   function fromRow(r){
     return {id:r.id,type:r.type,lat:r.lat,lng:r.lng,acc:r.acc,time:r.logged_at,address:r.address||"",
-      addrKind:r.addr_kind||null,edited:!!r.edited,count:r.tire_count==null?null:r.tire_count,photoPath:r.photo_path||null};
+      addrKind:r.addr_kind||null,edited:!!r.edited,count:r.tire_count==null?null:r.tire_count,photoPath:r.photo_path||null,projectId:r.project_id||null};
   }
-  var COLS = {type:"type",lat:"lat",lng:"lng",acc:"acc",time:"logged_at",address:"address",addrKind:"addr_kind",edited:"edited",count:"tire_count",photoPath:"photo_path"};
-  function listAll(table,order,map){
+  var COLS = {type:"type",lat:"lat",lng:"lng",acc:"acc",time:"logged_at",address:"address",addrKind:"addr_kind",edited:"edited",count:"tire_count",photoPath:"photo_path",projectId:"project_id"};
+  function listAll(table,order,map,filter,select){
     noStore();
     var out = [];
     function page(off){
-      return fetch(base+"/rest/v1/"+table+"?select=*&order="+order+"&limit=1000&offset="+off,{headers:headers(),cache:"no-store"})
+      return fetch(base+"/rest/v1/"+table+"?select="+(select||"*")+(filter?"&"+filter:"")+"&order="+order+"&limit=1000&offset="+off,{headers:headers(),cache:"no-store"})
         .then(ok).then(function(r){return r.json();}).then(function(rows){
           rows.forEach(function(r){ out.push(map(r)); });
           return rows.length===1000 ? page(off+1000) : out;
@@ -65,7 +75,8 @@
 
   SP.api = {
     photoUrl:function(path){ return base+"/storage/v1/object/public/photos/"+encodeURIComponent(path); },
-    listPins:function(){ return listAll("pins","logged_at.asc",fromRow); },
+    // projectId: only that project's pins (omit for every pin)
+    listPins:function(projectId){ return listAll("pins","logged_at.asc",fromRow,projectId?"project_id=eq."+encodeURIComponent(projectId):""); },
     upsertPin:function(p){
       noStore();
       return fetch(base+"/rest/v1/pins?on_conflict=id",{method:"POST",headers:jsonHeaders("resolution=merge-duplicates,return=minimal"),body:JSON.stringify(toRow(p))}).then(ok);
@@ -88,12 +99,52 @@
       noStore();
       return fetch(base+"/storage/v1/object/photos/"+encodeURIComponent(path),{method:"DELETE",headers:headers()}).then(ok);
     },
-    listTracks:function(){
-      return listAll("tracks","started_at.asc",function(r){ return {id:r.id,segs:r.points||[],miles:r.miles,startedAt:r.started_at,updatedAt:r.updated_at}; });
+    listTracks:function(projectId){
+      return listAll("tracks","started_at.asc",function(r){ return {id:r.id,projectId:r.project_id||null,segs:r.points||[],miles:r.miles,startedAt:r.started_at,updatedAt:r.updated_at}; },
+        projectId?"project_id=eq."+encodeURIComponent(projectId):"");
+    },
+    // Light summaries for the Runs page (no photos, no route points)
+    listPinSummaries:function(){
+      return listAll("pins","logged_at.asc",function(r){ return {projectId:r.project_id,type:r.type,count:r.tire_count,time:r.logged_at}; },"","project_id,type,tire_count,logged_at");
+    },
+    listTrackSummaries:function(){
+      return listAll("tracks","started_at.asc",function(r){ return {projectId:r.project_id,miles:r.miles||0}; },"","project_id,miles");
+    },
+    // ---- projects (runs) ----
+    listProjects:function(){
+      return listAll("projects","created_at.asc",function(r){ return {id:r.id,name:r.name,createdAt:r.created_at,archived:!!r.archived}; });
+    },
+    createProject:function(p){
+      noStore();
+      return fetch(base+"/rest/v1/projects?on_conflict=id",{method:"POST",headers:jsonHeaders("resolution=merge-duplicates,return=minimal"),body:JSON.stringify({id:p.id,name:p.name})}).then(ok);
+    },
+    renameProject:function(id,name){
+      noStore();
+      return fetch(base+"/rest/v1/projects?id=eq."+encodeURIComponent(id),{method:"PATCH",headers:jsonHeaders("return=minimal"),body:JSON.stringify({name:name})}).then(ok);
+    },
+    deletePhotos:function(paths){
+      noStore();
+      var chunks = [];
+      for (var i=0;i<paths.length;i+=100) chunks.push(paths.slice(i,i+100));
+      return chunks.reduce(function(chain,c){
+        return chain.then(function(){
+          return fetch(base+"/storage/v1/object/photos",{method:"DELETE",headers:headers({"Content-Type":"application/json"}),body:JSON.stringify({prefixes:c})}).then(ok);
+        });
+      },Promise.resolve());
+    },
+    // Deletes the project and everything in it: photos first, then pins, routes and the project itself
+    deleteProject:function(id){
+      noStore();
+      var q = encodeURIComponent(id);
+      return SP.api.listPins(id).then(function(pins){
+        return SP.api.deletePhotos(pins.map(function(p){return p.photoPath;}).filter(Boolean));
+      }).then(function(){ return fetch(base+"/rest/v1/pins?project_id=eq."+q,{method:"DELETE",headers:headers({Prefer:"return=minimal"})}).then(ok); })
+        .then(function(){ return fetch(base+"/rest/v1/tracks?project_id=eq."+q,{method:"DELETE",headers:headers({Prefer:"return=minimal"})}).then(ok); })
+        .then(function(){ return fetch(base+"/rest/v1/projects?id=eq."+q,{method:"DELETE",headers:headers({Prefer:"return=minimal"})}).then(ok); });
     },
     upsertTrack:function(t){
       noStore();
-      var row = {id:t.id,points:t.segs,miles:+(SP.segMeters(t.segs)/1609.344).toFixed(3),started_at:t.startedAt,updated_at:new Date().toISOString()};
+      var row = {id:t.id,project_id:t.projectId||null,points:t.segs,miles:+(SP.segMeters(t.segs)/1609.344).toFixed(3),started_at:t.startedAt,updated_at:new Date().toISOString()};
       return fetch(base+"/rest/v1/tracks?on_conflict=id",{method:"POST",headers:jsonHeaders("resolution=merge-duplicates,return=minimal"),body:JSON.stringify(row)}).then(ok);
     }
   };

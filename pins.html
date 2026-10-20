@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Site Pins: All Data</title>
+<title>Site Pins: Project Data</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <style>
   :root{--ink:#1b2329;--paper:#f6f5f1;--line:#d9d6cc;--muted:#5e6a72;--blue:#2b6cb0;--warn:#a4510a}
@@ -46,15 +46,24 @@
   .popimg{display:block;width:200px;max-width:100%;border-radius:6px;margin-top:6px}
   .lightbox{position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;z-index:5000;padding:16px}
   .lightbox img{max-width:100%;max-height:100%;border-radius:8px}
+  .projrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:6px 0 4px;font-size:14px}
+  .projrow label{font-weight:700;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+  .projrow select{font-family:inherit;font-size:16px;padding:9px 10px;border:2px solid var(--ink);border-radius:10px;background:#fff;color:var(--ink);max-width:100%}
   [hidden]{display:none!important}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
-    <h1>Site Pins: All Data</h1>
+    <h1 id="ptitle">Project data</h1>
     <a href="./">&larr; Back to logger</a>
   </header>
+  <div class="projrow" id="projrow" hidden>
+    <label for="projsel">Project</label>
+    <select id="projsel"></select>
+    <a id="logHere" href="./">Log into this project</a>
+    <a href="runs.html">All runs</a>
+  </div>
   <div id="sub" class="sub">Loading…</div>
 
   <div id="setup" class="notice" hidden>
@@ -99,8 +108,10 @@
     sub("Nothing to show yet.");
     return;
   }
-  document.getElementById("body").hidden = false;
+  var projects = [], projectId = null;
+  function projName(){ var p = projects.filter(function(x){return x.id===projectId;})[0]; return p ? p.name : ""; }
 
+  document.getElementById("body").hidden = true;
   var map = L.map("map").setView([42.3314,-83.0458],11);
   L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,
     attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(map);
@@ -163,15 +174,38 @@
 
   function load(){
     sub("Loading…");
-    return Promise.all([SP.api.listPins(),SP.api.listTracks().catch(function(){return tracks;})]).then(function(r){
+    return Promise.all([SP.api.listPins(projectId),SP.api.listTracks(projectId).catch(function(){return tracks;})]).then(function(r){
       var s = JSON.stringify(r);
       pins = r[0]; tracks = r[1];
       if (s !== sig){ sig = s; draw(); }
-      sub(pins.length+" pin"+(pins.length===1?"":"s")+" from everyone · updated "+new Date().toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}));
+      sub(pins.length+" pin"+(pins.length===1?"":"s")+" in this project, from everyone · updated "+new Date().toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}));
     },function(){ sub("Couldn't load the shared data. Check your connection and tap Refresh.",true); });
   }
-  load();
-  setInterval(function(){ if (!document.hidden) load(); },30000);
+  // Work out which project to show: ?project=ID, else this phone's last choice, else the newest.
+  SP.api.listProjects().then(function(list){
+    projects = list;
+    var q = new URLSearchParams(location.search).get("project");
+    projectId = q || SP.getSelected();
+    if (!projects.some(function(p){return p.id===projectId;})){ var n = SP.newest(projects); projectId = n ? n.id : null; }
+    if (!projectId){
+      document.getElementById("ptitle").textContent = "No projects yet";
+      sub("Start a project on the logger first.");
+      document.getElementById("setup").innerHTML = '<b>No projects yet.</b> Open the <a href="./">logger</a> and make the first project, or see <a href="runs.html">all runs</a>.';
+      document.getElementById("setup").hidden = false;
+      return;
+    }
+    document.getElementById("ptitle").textContent = projName();
+    document.title = projName()+": Site Pins";
+    var sel = document.getElementById("projsel");
+    sel.innerHTML = projects.slice().reverse().map(function(p){ return '<option value="'+esc(p.id)+'"'+(p.id===projectId?" selected":"")+'>'+esc(p.name)+'</option>'; }).join("");
+    sel.addEventListener("change",function(){ location.search = "?project="+encodeURIComponent(sel.value); });
+    document.getElementById("logHere").href = "./?project="+encodeURIComponent(projectId);
+    document.getElementById("projrow").hidden = false;
+    document.getElementById("body").hidden = false;
+    map.invalidateSize();
+    load();
+    setInterval(function(){ if (!document.hidden) load(); },30000);
+  },function(){ sub("Couldn't load projects. Check your connection and refresh.",true); });
   document.getElementById("reload").addEventListener("click",load);
 
   document.getElementById("chips").addEventListener("click",function(e){
@@ -195,14 +229,14 @@
   // Exports (all pins, regardless of the filter)
   document.getElementById("csv").addEventListener("click",function(){
     if (!pins.length){ sub("No pins to export yet.",true); return; }
-    SP.download(new Blob([SP.buildCsv(pins)],{type:"text/csv;charset=utf-8"}),"site-pins-"+SP.today()+".csv");
+    SP.download(new Blob([SP.buildCsv(pins)],{type:"text/csv;charset=utf-8"}),"site-pins-"+SP.slug(projName())+"-"+SP.today()+".csv");
     sub("Exported "+pins.length+" pins to CSV.");
   });
   document.getElementById("zip").addEventListener("click",function(){
     if (!pins.length){ sub("No pins to export yet.",true); return; }
     sub("Building ZIP…");
     SP.exportZip(pins,tracks).then(function(r){
-      SP.download(r.blob,"site-pins-"+SP.today()+".zip");
+      SP.download(r.blob,"site-pins-"+SP.slug(projName())+"-"+SP.today()+".zip");
       sub("Exported ZIP with "+pins.length+" pins and "+r.photos+" photos."+(r.missed?" "+r.missed+" photos couldn't be fetched, so try again.":""),!!r.missed);
     });
   });
@@ -215,7 +249,7 @@
   });
   document.getElementById("gpx").addEventListener("click",function(){
     if (!tracks.length){ sub("No routes have been recorded yet.",true); return; }
-    SP.download(new Blob([SP.gpx(tracks)],{type:"application/gpx+xml"}),"routes-"+SP.today()+".gpx");
+    SP.download(new Blob([SP.gpx(tracks)],{type:"application/gpx+xml"}),"routes-"+SP.slug(projName())+"-"+SP.today()+".gpx");
   });
 
   // Fill in addresses that never got looked up (for example if a phone lost signal)

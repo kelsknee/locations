@@ -4,7 +4,8 @@ Log brush, trash and tire piles at your exact GPS location, with photos and driv
 Everything is saved to a shared database, so it doesn't matter whose phone logged a pin.
 
 - `index.html` is the logger. Open it on a phone in the field.
-- `pins.html` is the data page. It shows every pin, photo and route from everyone, with CSV, photo ZIP and GPX export.
+- `runs.html` lists every project (run). Open one's data, log into it, rename it, or delete it.
+- `pins.html?project=ID` is the data page for one project. It shows every pin, photo and route from everyone in that run, with CSV, photo ZIP and GPX export.
 
 ## One-time setup (about 10 minutes, free)
 
@@ -22,6 +23,15 @@ Everything is saved to a shared database, so it doesn't matter whose phone logge
 5. Commit and push. The site updates in about a minute.
 
 The anon key is meant to be public. What it can do is limited by `setup.sql`.
+
+## Projects (runs)
+
+A project is one run. Every pin and route belongs to one, so you can keep old runs and start a new one on top.
+
+- On the logger, the **Project** button at the top picks which run this phone logs into, or makes a new one.
+- The first time a phone opens the logger it joins the newest project. If someone starts a newer one, other phones are asked "Switch or Stay" so nobody keeps logging into an old run by accident.
+- **All runs** shows every project with its pin counts and miles. Deleting a project permanently deletes its pins, photos and routes, and asks you to type its name first.
+- If you set up an earlier version, re-run `setup.sql` once to add projects. It is safe to run again and does not touch existing pins.
 
 ## How it behaves
 

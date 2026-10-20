@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Site Pins: All Runs</title>
+<style>
+  :root{--ink:#1b2329;--paper:#f6f5f1;--line:#d9d6cc;--muted:#5e6a72;--blue:#2b6cb0;--warn:#a4510a;--danger:#b3261e}
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:var(--ink);background:var(--paper);-webkit-tap-highlight-color:transparent}
+  .wrap{max-width:760px;margin:0 auto;padding:12px 16px calc(24px + env(safe-area-inset-bottom,0px))}
+  header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:6px}
+  h1{font-size:22px;margin:0}
+  a{color:var(--blue);font-weight:600}
+  .sub{font-size:13px;color:var(--muted);margin:2px 0 12px}
+  .sub.warn{color:var(--warn)}
+  .btn{appearance:none;border:1.5px solid var(--ink);background:transparent;color:var(--ink);border-radius:10px;padding:10px 13px;font-family:inherit;font-weight:600;font-size:14px;line-height:1;cursor:pointer;text-decoration:none;display:inline-block}
+  .btn.solid{background:var(--ink);color:#fff}
+  .btn.quiet{border-color:var(--line);color:var(--muted)}
+  .btn.danger{border-color:#e6b8b4;color:var(--danger)}
+  .btn:disabled{opacity:.5}
+  .btn:focus-visible,a:focus-visible,input:focus-visible{outline:3px solid var(--blue);outline-offset:2px}
+  form.new{display:flex;gap:8px;flex-wrap:wrap;background:#fff;border:1px solid var(--line);border-radius:14px;padding:12px;margin-bottom:14px}
+  form.new input{flex:1 1 220px;font-family:inherit;font-size:16px;padding:11px 12px;border:2px solid var(--line);border-radius:10px;color:var(--ink)}
+  .err{width:100%;font-size:13px;color:var(--warn);min-height:0}
+  .err:empty{display:none}
+  ul{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+  li.card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:14px}
+  li.card.current{border-color:var(--ink);box-shadow:0 0 0 1px var(--ink)}
+  .name{font-size:18px;font-weight:800;overflow-wrap:anywhere}
+  .badge{display:inline-block;font-size:11px;font-weight:700;background:var(--ink);color:#fff;border-radius:6px;padding:2px 6px;margin-left:6px;vertical-align:middle}
+  .meta{font-size:13px;color:var(--muted);margin-top:4px}
+  .nums{display:flex;gap:14px;flex-wrap:wrap;margin:10px 0}
+  .nums div{font-size:12px;color:var(--muted)}
+  .nums b{display:block;font-size:20px;color:var(--ink);line-height:1.1}
+  .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+  .empty,.notice{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px;font-size:14px;color:var(--muted)}
+  [hidden]{display:none!important}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>All runs</h1>
+    <a href="./">&larr; Back to logger</a>
+  </header>
+  <div id="sub" class="sub">Each project is one run. Earlier runs stay saved when you start a new one.</div>
+
+  <div id="setup" class="notice" hidden><b>Shared storage isn't set up yet.</b> Projects need the shared database. Steps are in <code>README.md</code>.</div>
+
+  <div id="body" hidden>
+    <form class="new" id="newForm" autocomplete="off">
+      <input id="newName" type="text" maxlength="60" placeholder="New project name, e.g. Oct 2026 east side" aria-label="New project name" enterkeyhint="done">
+      <button class="btn solid" type="submit">Start new project</button>
+      <div class="err" id="newErr" role="alert"></div>
+    </form>
+    <ul id="list" aria-label="Projects"></ul>
+  </div>
+</div>
+
+<script src="config.js"></script>
+<script src="shared.js"></script>
+<script>
+(function(){
+  var esc = SP.esc;
+  var subEl = document.getElementById("sub");
+  function sub(msg,warn){ subEl.textContent = msg; subEl.className = "sub"+(warn?" warn":""); }
+  if (!SP.configured){ document.getElementById("setup").hidden = false; return; }
+  document.getElementById("body").hidden = false;
+
+  var projects = [], stats = {};
+  function when(iso){ return new Date(iso).toLocaleDateString([], {month:"short",day:"numeric",year:"numeric"}); }
+
+  function render(){
+    var sel = SP.getSelected();
+    var ul = document.getElementById("list");
+    if (!projects.length){ ul.innerHTML = '<li class="empty">No projects yet. Start the first one above.</li>'; return; }
+    ul.innerHTML = projects.slice().reverse().map(function(p,i){
+      var s = stats[p.id] || {pins:0,brush:0,trash:0,tires:0,tireTotal:0,miles:0,last:null};
+      var current = p.id===sel;
+      return '<li class="card'+(current?' current':'')+'" data-id="'+esc(p.id)+'">'+
+        '<div class="name">'+esc(p.name)+(i===0?'<span class="badge">Newest</span>':'')+(current?'<span class="badge" style="background:#2e7d4f">This phone logs here</span>':'')+'</div>'+
+        '<div class="meta">Started '+when(p.createdAt)+(s.last?' · last pin '+when(s.last):'')+'</div>'+
+        '<div class="nums"><div><b>'+s.pins+'</b>pins</div><div><b>'+s.brush+'</b>brush</div><div><b>'+s.trash+'</b>trash</div>'+
+        '<div><b>'+s.tires+'</b>tire piles'+(s.tireTotal?' ('+s.tireTotal+' tires)':'')+'</div><div><b>'+s.miles.toFixed(1)+'</b>miles</div></div>'+
+        '<div class="row"><a class="btn solid" href="pins.html?project='+encodeURIComponent(p.id)+'">View data</a>'+
+        '<a class="btn" href="./?project='+encodeURIComponent(p.id)+'">Log into this one</a>'+
+        '<button class="btn quiet" type="button" data-rename="'+esc(p.id)+'">Rename</button>'+
+        '<button class="btn danger" type="button" data-delete="'+esc(p.id)+'">Delete</button></div></li>';
+    }).join("");
+  }
+
+  function load(){
+    sub("Loading…");
+    return Promise.all([SP.api.listProjects(),SP.api.listPinSummaries(),SP.api.listTrackSummaries().catch(function(){return [];})]).then(function(r){
+      projects = r[0]; stats = {};
+      r[1].forEach(function(x){
+        var s = stats[x.projectId] = stats[x.projectId] || {pins:0,brush:0,trash:0,tires:0,tireTotal:0,miles:0,last:null};
+        s.pins++; s[x.type]++; if (x.type==="tires" && x.count) s.tireTotal += x.count;
+        if (!s.last || x.time > s.last) s.last = x.time;
+      });
+      r[2].forEach(function(t){
+        var s = stats[t.projectId] = stats[t.projectId] || {pins:0,brush:0,trash:0,tires:0,tireTotal:0,miles:0,last:null};
+        s.miles += t.miles||0;
+      });
+      render();
+      sub(projects.length+" project"+(projects.length===1?"":"s")+". Each one is a separate run, and earlier runs stay saved.");
+    },function(){ sub("Couldn't load projects. Check your connection and refresh.",true); });
+  }
+  load();
+
+  document.getElementById("newForm").addEventListener("submit",function(e){
+    e.preventDefault();
+    var input = document.getElementById("newName"), err = document.getElementById("newErr");
+    var name = input.value.trim().replace(/\s+/g," ");
+    if (!name){ err.textContent = "Give the project a name."; return; }
+    if (projects.some(function(p){ return p.name.toLowerCase()===name.toLowerCase(); })){ err.textContent = "A project with that name already exists."; return; }
+    err.textContent = "Creating…";
+    var np = {id:SP.newId(),name:name};
+    SP.api.createProject(np).then(function(){
+      SP.setSelected(np.id); input.value = ""; err.textContent = "";
+      load().then(function(){ sub("Started “"+name+"”. This phone will now log into it; other phones are asked if they want to switch."); });
+    },function(){ err.textContent = "Couldn't create it. You need signal to start a new project."; });
+  });
+
+  document.getElementById("list").addEventListener("click",function(e){
+    var rid = e.target.getAttribute("data-rename"), did = e.target.getAttribute("data-delete");
+    if (rid){
+      var p = projects.filter(function(x){return x.id===rid;})[0];
+      var n = window.prompt("New name for this project:",p.name);
+      if (n === null) return;
+      n = n.trim().replace(/\s+/g," ");
+      if (!n || n===p.name) return;
+      if (projects.some(function(x){ return x.id!==rid && x.name.toLowerCase()===n.toLowerCase(); })){ sub("A project with that name already exists.",true); return; }
+      SP.api.renameProject(rid,n).then(load,function(){ sub("Couldn't rename it. Check your connection.",true); });
+    }
+    if (did){
+      var d = projects.filter(function(x){return x.id===did;})[0], s = stats[did] || {pins:0};
+      var typed = window.prompt("Delete “"+d.name+"” for everyone?\n\nThis permanently deletes its "+s.pins+" pin"+(s.pins===1?"":"s")+", photos and routes. It can't be undone.\n\nType the project name to confirm:","");
+      if (typed === null) return;
+      if (typed.trim().toLowerCase() !== d.name.toLowerCase()){ sub("That didn't match the project name, so nothing was deleted.",true); return; }
+      sub("Deleting…");
+      SP.api.deleteProject(did).then(function(){
+        if (SP.getSelected()===did) SP.setSelected(null);
+        return load().then(function(){ sub("Deleted “"+d.name+"”."); });
+      },function(){ sub("Couldn't finish deleting. Check your connection and try again.",true); load(); });
+    }
+  });
+})();
+</script>
+</body>
+</html>
