@@ -81,6 +81,10 @@
   .modal .err{color:#a4510a;font-size:13px;min-height:18px;margin-top:6px}
   .modal .row{display:flex;gap:8px;margin-top:6px}
   .modal .row .btn{flex:1 1 0;padding:14px 6px;font-size:15px}
+  .sync{font-size:12px;color:var(--muted)}
+  .sync.warn{color:#a4510a}
+  .sync a{color:#2b6cb0;font-weight:600}
+  li .tag{display:inline-block;font-size:11px;font-weight:700;color:#a4510a;border:1px solid #e3b98a;border-radius:6px;padding:0 5px;margin-left:4px}
   [hidden]{display:none!important}
   @media (prefers-reduced-motion:no-preference){.type{transition:background .12s}}
 </style>
@@ -119,6 +123,7 @@
   </div>
   <div id="status" class="status" role="status" aria-live="polite">Waiting for GPS…</div>
 
+  <div id="sync" class="sync"></div>
   <div class="bar">
     <div id="counts" class="counts">0 pins</div>
     <div class="actions">
@@ -144,46 +149,60 @@
   </form>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="config.js"></script>
+<script src="shared.js"></script>
 <script>
 (function(){
-  var TYPES = {
-    brush:{label:"Brush",color:"#2e7d4f",svg:'<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"><path d="M5 21c0-6 1-10 3-14M12 21V4M19 21c0-6-1-10-3-14"/></svg>'},
-    trash:{label:"Trash",color:"#d9822b",svg:'<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14"/></svg>'},
-    tires:{label:"Tires",color:"#2b2f36",svg:'<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></svg>'}
-  };
-  var KEY = "sitePinLogger.v1";
-  var CAM = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>';
+  var TYPES = SP.TYPES, esc = SP.esc, fmtCoord = SP.fmtCoord, countLabel = SP.countLabel, CAM = SP.CAM;
+  var OLD_KEY = "sitePinLogger.v1";   // pins used to live only on the phone; they're moved to the upload queue below
+  var pins = [];                      // everything shown: shared pins + pins still waiting to upload
+  var serverPins = [], serverSig = "";
+  var current = "brush";
+  var lastFix = null;
+  var statusEl = document.getElementById("status");
+  function setStatus(msg,warn){ statusEl.textContent = msg; statusEl.className = "status"+(warn?" warn":""); }
+  function findPin(id){ return pins.filter(function(p){return p.id===id;})[0]; }
 
-  // Photo storage (IndexedDB, keyed by pin id). Pins in localStorage just hold hasPhoto.
-  var dbp = new Promise(function(res){
+  // ---- Upload queue (IndexedDB). A pin sits here only until it reaches the shared database. ----
+  var outbox = {};                    // id -> {id, pin, photo:Blob|null}
+  var obp = new Promise(function(res){
     try {
-      var rq = indexedDB.open("sitePinLogger",1);
-      rq.onupgradeneeded = function(){ rq.result.createObjectStore("photos"); };
+      var rq = indexedDB.open("sitePinOutbox",1);
+      rq.onupgradeneeded = function(){ rq.result.createObjectStore("items",{keyPath:"id"}); };
       rq.onsuccess = function(){ res(rq.result); };
       rq.onerror = function(){ res(null); };
     } catch(e){ res(null); }
   });
-  function tx(mode,fn){
-    return dbp.then(function(db){
+  function obTx(mode,fn){
+    return obp.then(function(db){
       if (!db) return null;
       return new Promise(function(res){
-        var t = db.transaction("photos",mode), r = fn(t.objectStore("photos"));
+        var t = db.transaction("items",mode), r = fn(t.objectStore("items"));
         t.oncomplete = function(){ res(r && r.result!==undefined ? r.result : true); };
         t.onerror = t.onabort = function(){ res(null); };
       });
     });
   }
-  var photoURLs = {};
-  function putPhoto(id,blob){ return tx("readwrite",function(s){ return s.put(blob,id); }).then(function(ok){
-    if (!ok) return false;
-    if (photoURLs[id]) URL.revokeObjectURL(photoURLs[id]);
-    photoURLs[id] = URL.createObjectURL(blob); return true; }); }
-  function getPhoto(id){ return tx("readonly",function(s){ return s.get(id); }); }
-  function delPhoto(id){
-    if (photoURLs[id]){ URL.revokeObjectURL(photoURLs[id]); delete photoURLs[id]; }
-    return tx("readwrite",function(s){ return s.delete(id); });
+  function obPut(it){ return obTx("readwrite",function(s){ return s.put(it); }); }
+  function obDel(id){ return obTx("readwrite",function(s){ return s.delete(id); }); }
+  var localURLs = {};                 // id -> blob: URL for photos not uploaded yet
+  function setLocalPhoto(id,blob){
+    if (localURLs[id]){ URL.revokeObjectURL(localURLs[id]); delete localURLs[id]; }
+    if (blob) localURLs[id] = URL.createObjectURL(blob);
   }
-  // Shrink phone photos (often 4-12 MB) to ~1600px JPEG so dozens of pins fit.
+  function photoSrc(p){ return p.photoPath ? SP.api.photoUrl(p.photoPath) : (localURLs[p.id] || null); }
+
+  function buildPins(){
+    var out = serverPins.filter(function(p){ return !outbox[p.id]; });
+    Object.keys(outbox).forEach(function(id){
+      var it = outbox[id], p = Object.assign({}, it.pin);
+      p.pending = true; p.localBlob = it.photo || null; out.push(p);
+    });
+    out.sort(function(a,b){ return a.time<b.time ? -1 : a.time>b.time ? 1 : 0; });
+    pins = out;
+  }
+
+  // Shrink phone photos (often 4-12 MB) to ~1600px JPEG so uploads are quick.
   function shrink(file){
     return new Promise(function(res,rej){
       var url = URL.createObjectURL(file), img = new Image();
@@ -199,13 +218,8 @@
       img.src = url;
     });
   }
-  var pins = [];
-  var current = "brush";
-  var lastFix = null;
 
-  try { pins = JSON.parse(localStorage.getItem(KEY) || "[]"); } catch(e){ pins = []; }
-  function save(){ try { localStorage.setItem(KEY, JSON.stringify(pins)); } catch(e){} }
-
+  // ---- Map ----
   var map = L.map("map",{zoomControl:true}).setView([42.3314,-83.0458],13);
   L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,
     attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(map);
@@ -228,26 +242,31 @@
   setFollowUI();
   map.on("dragstart popupopen",function(){ follow = false; setFollowUI(); });
 
-  var markers = {};
+  var markers = {};                   // id -> {m, p}
   var meMarker = null, meCircle = null;
-
   function pinIcon(t){
     return L.divIcon({className:"",iconSize:[32,32],iconAnchor:[16,32],
       html:'<div class="pin" style="background:'+TYPES[t].color+'">'+TYPES[t].svg+'</div>'});
   }
-  function addMarker(p){
-    var m = L.marker([p.lat,p.lng],{icon:pinIcon(p.type)}).addTo(map);
-    m.bindPopup(function(){ return "<b>"+TYPES[p.type].label+(p.type==="tires"?" ("+countLabel(p)+")":"")+"</b><br>"+esc(p.address||fmtCoord(p))+
-      (photoURLs[p.id]?'<img class="popimg" alt="Photo of this pin" src="'+photoURLs[p.id]+'">':""); });
-    markers[p.id] = m;
+  function syncMarkers(){
+    var seen = {};
+    pins.forEach(function(p){
+      seen[p.id] = true;
+      var e = markers[p.id];
+      if (e){ e.p = p; return; }
+      e = markers[p.id] = {p:p, m:L.marker([p.lat,p.lng],{icon:pinIcon(p.type)}).addTo(map)};
+      e.m.bindPopup(function(){
+        var q = e.p, src = photoSrc(q);
+        return "<b>"+TYPES[q.type].label+(q.type==="tires"?" ("+countLabel(q)+")":"")+"</b><br>"+esc(q.address||fmtCoord(q))+
+          (src?'<img class="popimg" alt="Photo of this pin" src="'+src+'">':"");
+      });
+    });
+    Object.keys(markers).forEach(function(id){
+      if (!seen[id]){ map.removeLayer(markers[id].m); delete markers[id]; }
+    });
   }
-  function esc(s){ return String(s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];}); }
-  function fmtCoord(p){ return p.lat.toFixed(6)+", "+p.lng.toFixed(6); }
 
-  // Live location
-  var statusEl = document.getElementById("status");
-  function setStatus(msg,warn){ statusEl.textContent = msg; statusEl.className = "status"+(warn?" warn":""); }
-
+  // ---- Live location ----
   if (!("geolocation" in navigator)) {
     setStatus("This browser has no location access.",true);
     document.getElementById("go").disabled = true;
@@ -271,29 +290,29 @@
     },{enableHighAccuracy:true,maximumAge:2000,timeout:20000});
   }
 
-  // Drive tracking: records the route as line segments (a new segment each time tracking starts)
+  // ---- Drive tracking: records the route as line segments (a new segment each time tracking starts).
+  // The route is kept on the phone while recording and copied to the shared database every minute and when you stop.
   var TKEY = "sitePinLogger.track.v1";
-  var track = {on:false,segs:[]};
+  var track = {id:null,on:false,segs:[],dirty:false};
   try { var t0 = JSON.parse(localStorage.getItem(TKEY)||"null"); if (t0 && t0.segs) track = t0; } catch(e){}
   function saveTrack(){ try { localStorage.setItem(TKEY,JSON.stringify(track)); } catch(e){} }
-  var trackLine = L.polyline(track.segs.map(function(sg){return sg.map(function(q){return [q[0],q[1]];});}),
-    {color:"#2b6cb0",weight:5,opacity:.8,lineJoin:"round",interactive:false}).addTo(map);
+  var trackLine = L.polyline([],{color:"#2b6cb0",weight:5,opacity:.8,lineJoin:"round",interactive:false}).addTo(map);
   var trackBtn = document.getElementById("track"), trackInfo = document.getElementById("trackinfo");
-  function dist(a,b){ // metres, haversine
-    var R=6371000,r=Math.PI/180,dl=(b[0]-a[0])*r,dn=(b[1]-a[1])*r;
-    var h=Math.sin(dl/2)*Math.sin(dl/2)+Math.cos(a[0]*r)*Math.cos(b[0]*r)*Math.sin(dn/2)*Math.sin(dn/2);
-    return 2*R*Math.asin(Math.sqrt(h));
-  }
-  function trackMeters(){
-    var m=0; track.segs.forEach(function(sg){ for(var i=1;i<sg.length;i++) m+=dist(sg[i-1],sg[i]); }); return m;
-  }
+  function trackPoints(){ return track.segs.reduce(function(a,sg){return a+sg.length;},0); }
   function renderTrack(){
-    var n = track.segs.reduce(function(a,sg){return a+sg.length;},0);
+    var n = trackPoints();
     trackBtn.setAttribute("aria-pressed",track.on?"true":"false");
     trackBtn.textContent = track.on ? "Stop tracking" : (n ? "Resume tracking" : "Start tracking drive");
-    trackInfo.textContent = track.on || n ? (trackMeters()/1609.344).toFixed(2)+" mi driven"+(track.on?" · recording":"") : "No route yet.";
+    trackInfo.textContent = track.on || n ? (SP.segMeters(track.segs)/1609.344).toFixed(2)+" mi driven"+(track.on?" · recording":"") : "No route yet.";
     document.getElementById("gpx").hidden = document.getElementById("cleartrack").hidden = !n;
     trackLine.setLatLngs(track.segs.map(function(sg){return sg.map(function(q){return [q[0],q[1]];});}));
+  }
+  function syncTrack(){
+    if (!SP.configured || !track.id || !track.dirty || !trackPoints()) return Promise.resolve();
+    var n = trackPoints(), started = track.segs[0] && track.segs[0][0] ? new Date(track.segs[0][0][2]).toISOString() : new Date().toISOString();
+    return SP.api.upsertTrack({id:track.id,segs:track.segs,startedAt:started}).then(function(){
+      if (trackPoints()===n){ track.dirty = false; saveTrack(); }
+    },function(){});
   }
   function onFix(pos){
     if (!track || !track.on) return;
@@ -302,8 +321,8 @@
     if (!sg){ sg = []; track.segs.push(sg); }
     var q = [+pos.coords.latitude.toFixed(6),+pos.coords.longitude.toFixed(6),pos.timestamp||Date.now()];
     var last = sg[sg.length-1];
-    if (last && dist(last,q) < Math.max(5, Math.min(pos.coords.accuracy,15)/2)) return; // skip standing still / GPS drift
-    sg.push(q); saveTrack(); renderTrack();
+    if (last && SP.dist(last,q) < Math.max(5, Math.min(pos.coords.accuracy,15)/2)) return; // skip standing still / GPS drift
+    sg.push(q); track.dirty = true; saveTrack(); renderTrack();
   }
   var wake = null;
   function holdScreen(){
@@ -314,6 +333,7 @@
   trackBtn.addEventListener("click",function(){
     track.on = !track.on;
     if (track.on){
+      if (!track.id) track.id = Date.now().toString(36)+Math.random().toString(36).slice(2,6);
       track.segs.push([]);
       if (lastFix) onFix(lastFix);
       holdScreen();
@@ -321,35 +341,24 @@
     } else {
       if (wake){ wake.release(); wake = null; }
       track.segs = track.segs.filter(function(sg){return sg.length;});
+      track.dirty = true;
       setStatus("Tracking stopped.");
+      syncTrack();
     }
     saveTrack(); renderTrack();
     if (track.on) trackBtn.blur();
   });
   document.getElementById("cleartrack").addEventListener("click",function(){
-    if (confirm("Delete the recorded route? Export the GPX first if you need it.")){
-      track = {on:false,segs:[]}; if (wake){ wake.release(); wake = null; } saveTrack(); renderTrack();
+    if (confirm("Clear this route from your screen? "+(SP.configured?"The saved copy stays on the shared data page.":"It has not been uploaded, so export the GPX first if you need it."))){
+      track = {id:null,on:false,segs:[],dirty:false}; if (wake){ wake.release(); wake = null; } saveTrack(); renderTrack();
     }
   });
   document.getElementById("gpx").addEventListener("click",function(){
-    var x = '<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="Site Pin Logger" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>Drive '+new Date().toISOString().slice(0,10)+'</name>';
-    track.segs.forEach(function(sg){
-      x += "<trkseg>"+sg.map(function(q){ return '<trkpt lat="'+q[0]+'" lon="'+q[1]+'"><time>'+new Date(q[2]).toISOString()+'</time></trkpt>'; }).join("")+"</trkseg>";
-    });
-    x += "</trk></gpx>";
-    var a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([x],{type:"application/gpx+xml"}));
-    a.download = "drive-"+new Date().toISOString().slice(0,10)+".gpx";
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(function(){ URL.revokeObjectURL(a.href); },2000);
+    SP.download(new Blob([SP.gpx([{segs:track.segs}])],{type:"application/gpx+xml"}),"drive-"+SP.today()+".gpx");
   });
-  function fitAll(){
-    var pts = []; track.segs.forEach(function(sg){ sg.forEach(function(q){ pts.push([q[0],q[1]]); }); });
-    pins.forEach(function(p){ pts.push([p.lat,p.lng]); });
-    return pts;
-  }
+  setInterval(function(){ if (track.on) syncTrack(); },60000);
 
-  // Type picker
+  // ---- Type picker ----
   var typeBtns = document.querySelectorAll(".type");
   typeBtns.forEach(function(b){
     b.addEventListener("click",function(){
@@ -358,40 +367,88 @@
     });
   });
 
-  // Reverse geocode (queued, 1 request/sec per Nominatim policy)
-  var queue = [], working = false;
-  function geocode(p){
-    if (queue.indexOf(p.id)===-1) queue.push(p.id);
-    if (!working) runQueue();
+  // ---- Saving changes to a pin: waiting pins change in the queue, shared pins are updated in the database ----
+  function updatePin(id,fields){
+    var it = outbox[id];
+    if (it){ Object.assign(it.pin,fields); obPut(it); buildPins(); render(); return Promise.resolve(); }
+    var sp = serverPins.filter(function(p){return p.id===id;})[0];
+    if (!sp) return Promise.resolve();
+    Object.assign(sp,fields); buildPins(); render();
+    return SP.api.patchPin(id,fields).catch(function(){
+      setStatus("No signal, so that change wasn't saved. Try again when you're back online.",true); refresh();
+    });
   }
-  function runQueue(){
-    working = true;
-    var id = queue.shift();
-    var p = pins.filter(function(x){return x.id===id;})[0];
-    if (!p){ working = queue.length>0; if (working) runQueue(); return; }
-    fetch("https://nominatim.openstreetmap.org/reverse?format=jsonv2&addressdetails=1&zoom=18&lat="+p.lat+"&lon="+p.lng,{headers:{"Accept":"application/json"}})
-      .then(function(r){ if(!r.ok) throw new Error("http"); return r.json(); })
-      .then(function(j){
-        var a = j.address || {};
-        var street = [a.house_number,a.road].filter(Boolean).join(" ");
-        var city = a.city||a.town||a.village||a.hamlet||"";
-        var place = street||a.neighbourhood||a.suburb||"";
-        if (!p.edited){
-          if (a.house_number){ p.addrKind = "Exact"; }
-          else { p.addrKind = "Nearest"; if (a.road) place = "Near "+a.road; else if (place) place = "Near "+place; }
-          var line = [place, city, a.state, a.postcode].filter(Boolean);
-          p.address = line.length ? line.join(", ") : "";
-          if (!p.address){ p.addrKind = "None"; }
-        }
-        p.addrPending = false; save(); render();
-      })
-      .catch(function(){ p.addrPending = true; save(); render(); })
-      .then(function(){
-        setTimeout(function(){ if (queue.length) runQueue(); else working = false; },1100);
-      });
+  function removePin(id){
+    var it = outbox[id], sp = serverPins.filter(function(p){return p.id===id;})[0];
+    if (it){ delete outbox[id]; obDel(id); setLocalPhoto(id,null); }
+    serverPins = serverPins.filter(function(p){return p.id!==id;});
+    buildPins(); render();
+    if (sp && !it){
+      SP.api.deletePin(id).then(function(){ if (sp.photoPath) return SP.api.deletePhoto(sp.photoPath).catch(function(){}); })
+        .catch(function(){ setStatus("No signal, so that pin wasn't deleted. Try again when you're back online.",true); refresh(); });
+    }
   }
 
-  // Photo capture: take one before logging (attaches to the next pin), or add/replace on an existing pin
+  // ---- Address lookup for pins this phone logged ----
+  var geoWait = {};
+  var geocode = SP.makeGeocoder(function(p,r){
+    delete geoWait[p.id];
+    var cur = findPin(p.id);
+    if (r && cur && !cur.edited) updatePin(p.id,{address:r.address,addrKind:r.addrKind});
+    else render();
+  });
+  function lookupAddress(p){ geoWait[p.id] = true; geocode(p); }
+
+  // ---- Syncing with the shared database ----
+  var syncEl = document.getElementById("sync"), flushing = false;
+  function renderSync(){
+    var n = Object.keys(outbox).length, link = ' · <a href="pins.html">View all data</a>';
+    syncEl.className = "sync"+(!SP.configured||n?" warn":"");
+    syncEl.innerHTML = !SP.configured ? "Shared storage isn't set up yet, so pins are only on this phone."+link
+      : n ? n+" pin"+(n===1?"":"s")+" waiting to upload"+(navigator.onLine?"…":" (offline, they'll upload when you have signal)")+link
+      : "All pins saved to the shared data page."+link;
+  }
+  function flush(){
+    if (!SP.configured || flushing) return Promise.resolve();
+    var ids = Object.keys(outbox);
+    if (!ids.length) return Promise.resolve();
+    flushing = true;
+    function next(i){
+      if (i >= ids.length) return Promise.resolve();
+      var it = outbox[ids[i]];
+      if (!it) return next(i+1);
+      var step = Promise.resolve();
+      if (it.photo){
+        var path = it.pin.photoPath || (it.id+"-"+Date.now().toString(36)+".jpg");
+        step = SP.api.uploadPhoto(path,it.photo).then(function(){ it.pin.photoPath = path; });
+      }
+      // if the pin changes while it's uploading (e.g. its address arrives), send it again before dropping it from the queue
+      function send(){ var snap = JSON.stringify(it.pin); return SP.api.upsertPin(it.pin).then(function(){ if (JSON.stringify(it.pin)!==snap) return send(); }); }
+      return step.then(send).then(function(){
+        delete outbox[it.id]; obDel(it.id);
+        serverPins = serverPins.filter(function(p){return p.id!==it.id;});
+        serverPins.push(Object.assign({},it.pin));
+        setLocalPhoto(it.id,null);
+        if (!it.pin.address && it.pin.addrKind!=="None" && !geoWait[it.id]) lookupAddress(it.pin);
+        return next(i+1);
+      });
+    }
+    return next(0).catch(function(){}).then(function(){ flushing = false; buildPins(); syncMarkers(); render(); });
+  }
+  function refresh(){
+    if (!SP.configured) return Promise.resolve();
+    return SP.api.listPins().then(function(rows){
+      var sig = JSON.stringify(rows);
+      if (sig !== serverSig){ serverSig = sig; serverPins = rows; buildPins(); syncMarkers(); render(); }
+      else renderSync();
+    },function(){ renderSync(); });
+  }
+  function syncAll(){ return flush().then(refresh).then(syncTrack); }
+  setInterval(function(){ if (!document.hidden) syncAll(); },20000);
+  window.addEventListener("online",syncAll);
+  document.addEventListener("visibilitychange",function(){ if (!document.hidden) syncAll(); });
+
+  // ---- Photo capture: take one before logging (attaches to the next pin), or add/replace on an existing pin ----
   var fileEl = document.getElementById("file"), stageEl = document.getElementById("stage");
   var staged = null, stagedURL = null, targetId = null;
   function showStage(){
@@ -409,16 +466,20 @@
     setStatus("Processing photo…");
     shrink(f).then(function(b){
       if (!id){ staged = b; showStage(); setStatus("Photo ready. It will attach to the next pin you log."); return; }
-      var p = pins.filter(function(x){return x.id===id;})[0];
+      var p = findPin(id);
       if (!p) return;
-      return putPhoto(id,b).then(function(ok){
-        if (!ok){ setStatus("Couldn't store the photo on this device.",true); return; }
-        p.hasPhoto = true; save(); render(); setStatus("Photo saved to that pin.");
-      });
+      var it = outbox[id];
+      if (it){ it.photo = b; setLocalPhoto(id,b); obPut(it); buildPins(); render(); setStatus("Photo saved to that pin."); flush(); return; }
+      var path = id+"-"+Date.now().toString(36)+".jpg", old = p.photoPath;
+      setStatus("Uploading photo…");
+      return SP.api.uploadPhoto(path,b).then(function(){ return updatePin(id,{photoPath:path}); }).then(function(){
+        if (old) SP.api.deletePhoto(old).catch(function(){});
+        setStatus("Photo saved to that pin.");
+      },function(){ setStatus("Couldn't upload the photo. Check your signal and try again.",true); });
     },function(){ setStatus("Couldn't read that photo.",true); });
   });
 
-  // Tire piles: ask how many with a number-pad dialog. cb gets null (cancelled), "" (not sure) or a whole number.
+  // ---- Tire piles: ask how many with a number-pad dialog. cb gets null (cancelled), "" (not sure) or a whole number.
   // Must be called straight from a tap so the phone opens the keypad.
   var cm = document.getElementById("countModal"), cmInput = document.getElementById("cmInput"), cmErr = document.getElementById("cmErr");
   var cmDone = null;
@@ -438,11 +499,12 @@
   document.getElementById("cmUnknown").addEventListener("click",function(){ cmDone && cmDone(""); });
   document.getElementById("cmCancel").addEventListener("click",function(){ cmDone && cmDone(null); });
   document.addEventListener("keydown",function(e){ if (e.key==="Escape" && !cm.hidden && cmDone) cmDone(null); });
-  function countLabel(p){ return p.type==="tires" ? (p.count===""||p.count==null ? "count unknown" : p.count+(p.count===1?" tire":" tires")) : ""; }
 
-  // Log a pin
+  // ---- Log a pin ----
   var holdStatus = 0, waitingFix = null, MAX_ACC = 20; // metres: pins must be at least this accurate
   var goBtn = document.getElementById("go");
+  var lastMine = null;                 // the last pin logged on this phone; "Undo last" only removes your own pin
+  try { lastMine = sessionStorage.getItem("sitePinLogger.lastMine"); } catch(e){}
   goBtn.addEventListener("click",function(){
     var type = current;
     if (type === "tires"){
@@ -462,15 +524,17 @@
       try {
         var p = {id:Date.now().toString(36)+Math.random().toString(36).slice(2,5),
           type:type,lat:pos.coords.latitude,lng:pos.coords.longitude,
-          acc:Math.round(pos.coords.accuracy),time:new Date().toISOString(),address:"",addrPending:true};
-        if (type === "tires") p.count = count;
+          acc:Math.round(pos.coords.accuracy),time:new Date().toISOString(),address:"",addrKind:null,edited:false,
+          count:type==="tires"?count:null,photoPath:null};
         var shot = staged; staged = null; showStage();
-        if (shot){ p.hasPhoto = true; putPhoto(p.id,shot).then(function(ok){
-          if (!ok){ p.hasPhoto = false; save(); setStatus("Pin saved, but the photo couldn't be stored.",true); }
-          render(); }); }
-        pins.push(p); save(); addMarker(p); map.panTo([p.lat,p.lng]); render(); geocode(p);
+        var it = {id:p.id,pin:p,photo:shot||null};
+        outbox[p.id] = it; obPut(it);
+        if (shot) setLocalPhoto(p.id,shot);
+        lastMine = p.id; try { sessionStorage.setItem("sitePinLogger.lastMine",p.id); } catch(e){}
+        buildPins(); syncMarkers(); map.panTo([p.lat,p.lng]); render(); lookupAddress(p);
         if (navigator.vibrate) navigator.vibrate(40);
-        setStatus("Pin logged.");
+        setStatus(SP.configured ? "Pin logged." : "Pin logged on this phone. Shared storage isn't set up yet.");
+        flush().then(refresh);
       } catch(e){ setStatus("Something went wrong saving that pin. Try again.",true); }
       done();
     }
@@ -496,129 +560,83 @@
     navigator.geolocation.getCurrentPosition(take,function(err){
       if (err.code!==1) return; // a timeout here is fine; the live GPS watch and the 25 s limit decide
       waitingFix = null;
-      fail(err.code===1?"Location is blocked. Allow location for this site.":"Couldn't get your location. Try again in a moment.");
+      fail("Location is blocked. Allow location for this site.");
     },{enableHighAccuracy:true,maximumAge:0,timeout:25000});
   }
 
-  // List
+  // ---- List ----
   var listEl = document.getElementById("list"), countsEl = document.getElementById("counts");
   function render(){
     var c = {brush:0,trash:0,tires:0}, tireTotal = 0;
     pins.forEach(function(p){ c[p.type]++; if (p.type==="tires" && p.count) tireTotal += p.count; });
-    document.getElementById("undo").disabled = !pins.length;
+    document.getElementById("undo").disabled = !(lastMine && findPin(lastMine));
     countsEl.textContent = pins.length+" pin"+(pins.length===1?"":"s")+
       (pins.length?" · Brush "+c.brush+" · Trash "+c.trash+" · Tires "+c.tires+(tireTotal?" ("+tireTotal+" total)":""):"");
+    renderSync();
     if (!pins.length){ listEl.innerHTML = '<li class="empty">No pins yet. Pick a type, then tap Log pin.</li>'; return; }
     listEl.innerHTML = pins.slice().reverse().map(function(p){
-      var t = new Date(p.time).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"});
-      var th = photoURLs[p.id]
-        ? '<img class="thumb" alt="Photo. Tap to view." data-view="'+p.id+'" src="'+photoURLs[p.id]+'">'
+      var d = new Date(p.time), t = d.toLocaleDateString([], {month:"short",day:"numeric"})+", "+d.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"});
+      var src = photoSrc(p);
+      var th = src
+        ? '<img class="thumb" alt="Photo. Tap to view." data-view="'+p.id+'" src="'+src+'">'
         : '<button class="thumb none" aria-label="Add photo" data-photo="'+p.id+'">'+CAM+'</button>';
       return '<li data-id="'+p.id+'">'+th+'<span class="dot" style="background:'+TYPES[p.type].color+'"></span>'+
-        '<div class="txt"><div class="addr">'+esc(p.address||(p.addrPending?"Finding address…":fmtCoord(p)))+'</div>'+
-        '<div class="meta">'+TYPES[p.type].label+(p.type==="tires"?' · <button class="lnk" data-count="'+p.id+'" aria-label="Edit tire count">'+countLabel(p)+'</button>':'')+' · '+t+' · '+(p.acc>MAX_ACC?'<b style="color:#a4510a">±'+p.acc+' m, weak GPS: recheck</b>':'±'+p.acc+' m')+'</div>'+
+        '<div class="txt"><div class="addr">'+esc(p.address||(geoWait[p.id]?"Finding address…":fmtCoord(p)))+'</div>'+
+        '<div class="meta">'+TYPES[p.type].label+(p.type==="tires"?' · <button class="lnk" data-count="'+p.id+'" aria-label="Edit tire count">'+countLabel(p)+'</button>':'')+' · '+t+' · '+(p.acc>MAX_ACC?'<b style="color:#a4510a">±'+p.acc+' m, weak GPS: recheck</b>':'±'+p.acc+' m')+(p.pending&&SP.configured?'<span class="tag">waiting to upload</span>':'')+'</div>'+
         '<div class="meta">'+fmtCoord(p)+(p.addrKind==="Nearest"?" · no street number":"")+'</div></div>'+
-        '<button aria-label="Replace photo" data-photo="'+p.id+'"'+(photoURLs[p.id]?'':' hidden')+'>'+CAM+'</button>'+
+        '<button aria-label="Replace photo" data-photo="'+p.id+'"'+(src?'':' hidden')+'>'+CAM+'</button>'+
         '<button aria-label="Edit address" data-edit="'+p.id+'">&#9998;</button>'+
         '<button aria-label="Delete pin" data-del="'+p.id+'">&times;</button></li>';
     }).join("");
   }
-  function removePin(id){
-    delPhoto(id);
-    pins = pins.filter(function(p){return p.id!==id;});
-    if (markers[id]){ map.removeLayer(markers[id]); delete markers[id]; }
-    save(); render();
-  }
   document.getElementById("undo").addEventListener("click",function(){
-    var p = pins[pins.length-1];
+    var p = lastMine && findPin(lastMine);
     if (!p) return;
-    var t = new Date(p.time).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"});
-    if (confirm("Remove the last pin?\n\n"+TYPES[p.type].label+(p.type==="tires"?" ("+countLabel(p)+")":"")+" at "+t+(p.address?"\n"+p.address:"")+(p.hasPhoto?"\n(its photo will be removed too)":""))){
-      removePin(p.id); setStatus("Removed the last pin.");
+    var d = new Date(p.time), t = d.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"});
+    if (confirm("Remove the pin you just logged?\n\n"+TYPES[p.type].label+(p.type==="tires"?" ("+countLabel(p)+")":"")+" at "+t+(p.address?"\n"+p.address:"")+(SP.hasPhoto(p)?"\n(its photo will be removed too)":""))){
+      removePin(p.id); lastMine = null; setStatus("Removed that pin.");
     }
   });
   listEl.addEventListener("click",function(e){
     var eid = e.target.getAttribute("data-edit");
     if (eid){
-      var ep = pins.filter(function(p){return p.id===eid;})[0];
+      var ep = findPin(eid);
       var v = window.prompt("Address or landmark for this pin (e.g. \"I-94 service drive, east of Conant\"):", ep.address||"");
-      if (v !== null){ ep.address = v.trim(); ep.edited = !!ep.address; ep.addrKind = ep.address ? "Edited" : "None"; save(); render(); }
+      if (v !== null){ v = v.trim(); updatePin(eid,{address:v,edited:!!v,addrKind:v?"Edited":"None"}); }
       return;
     }
     var cid = e.target.getAttribute("data-count");
     if (cid){
-      var cp = pins.filter(function(p){return p.id===cid;})[0];
-      askCount(cp.count,function(nv){ if (nv !== null){ cp.count = nv; save(); render(); } });
+      var cp = findPin(cid);
+      askCount(cp.count,function(nv){ if (nv !== null) updatePin(cid,{count:nv===""?null:nv}); });
       return;
     }
     var btn = e.target.closest("[data-photo]");
     if (btn){ targetId = btn.getAttribute("data-photo"); fileEl.value = ""; fileEl.click(); return; }
     var vid = e.target.getAttribute("data-view");
-    if (vid){ window.open(photoURLs[vid],"_blank"); return; }
+    if (vid){ var vp = findPin(vid); if (vp && photoSrc(vp)) window.open(photoSrc(vp),"_blank"); return; }
     var id = e.target.getAttribute("data-del");
-    if (id){ removePin(id); return; }
+    if (id){
+      var dp = findPin(id);
+      if (dp && confirm("Delete this pin"+(SP.configured?" for everyone":"")+"?\n\n"+TYPES[dp.type].label+(dp.address?"\n"+dp.address:""))) removePin(id);
+      return;
+    }
     var li = e.target.closest("li[data-id]");
-    if (li && markers[li.dataset.id]){ var m = markers[li.dataset.id]; map.setView(m.getLatLng(),18); m.openPopup(); }
+    if (li && markers[li.dataset.id]){ var m = markers[li.dataset.id].m; map.setView(m.getLatLng(),18); m.openPopup(); }
   });
 
-  // Export
-  function csvCell(v){ v = String(v==null?"":v); return /[",\n]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v; }
-  function photoName(p,i){ return "photos/"+String(i+1).padStart(3,"0")+"-"+p.type+".jpg"; }
-  function buildCsv(){
-    var rows = [["Type","Address","Address quality","Latitude","Longitude","Accuracy (m)","Logged at","Map link","Photo file","Tire count"]];
-    pins.forEach(function(p,i){ rows.push([TYPES[p.type].label,p.address||"",p.addrKind||(p.address?"":"None"),p.lat.toFixed(6),p.lng.toFixed(6),p.acc,p.time,"https://www.google.com/maps?q="+p.lat.toFixed(6)+","+p.lng.toFixed(6),p.hasPhoto?photoName(p,i):"",p.type==="tires"&&p.count!==""&&p.count!=null?p.count:""]); });
-    return "\ufeff"+rows.map(function(r){return r.map(csvCell).join(",");}).join("\r\n");
-  }
-  function download(blob,name){
-    var a = document.createElement("a");
-    a.href = URL.createObjectURL(blob); a.download = name;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(function(){ URL.revokeObjectURL(a.href); },2000);
-  }
-  var today = function(){ return new Date().toISOString().slice(0,10); };
+  // ---- Export ----
   document.getElementById("csv").addEventListener("click",function(){
     if (!pins.length){ setStatus("Log at least one pin first.",true); return; }
-    download(new Blob([buildCsv()],{type:"text/csv;charset=utf-8"}),"site-pins-"+today()+".csv");
+    SP.download(new Blob([SP.buildCsv(pins)],{type:"text/csv;charset=utf-8"}),"site-pins-"+SP.today()+".csv");
     setStatus("Exported "+pins.length+" pins. Every row has lat/long and a map link, even where there's no street address. Use Photos ZIP to get the photos.");
   });
-
-  // Minimal ZIP writer (stored, no compression; JPEGs are already compressed)
-  var crcT = (function(){ var t=[],c,n,k; for(n=0;n<256;n++){ c=n; for(k=0;k<8;k++) c = c&1 ? 0xEDB88320^(c>>>1) : c>>>1; t[n]=c>>>0; } return t; })();
-  function crc32(u8){ var c=0xFFFFFFFF; for(var i=0;i<u8.length;i++) c = crcT[(c^u8[i])&255]^(c>>>8); return (c^0xFFFFFFFF)>>>0; }
-  function makeZip(files){ // [{name, data:Uint8Array}]
-    var enc = new TextEncoder(), parts = [], central = [], off = 0, d = new Date();
-    var dt = ((d.getFullYear()-1980)<<9)|((d.getMonth()+1)<<5)|d.getDate(), tm = (d.getHours()<<11)|(d.getMinutes()<<5)|(d.getSeconds()>>1);
-    files.forEach(function(f){
-      var nm = enc.encode(f.name), crc = crc32(f.data), sz = f.data.length;
-      var h = new DataView(new ArrayBuffer(30));
-      h.setUint32(0,0x04034b50,true); h.setUint16(4,20,true); h.setUint16(6,0x0800,true); h.setUint16(8,0,true);
-      h.setUint16(10,tm,true); h.setUint16(12,dt,true); h.setUint32(14,crc,true); h.setUint32(18,sz,true); h.setUint32(22,sz,true);
-      h.setUint16(26,nm.length,true); h.setUint16(28,0,true);
-      var c = new DataView(new ArrayBuffer(46));
-      c.setUint32(0,0x02014b50,true); c.setUint16(4,20,true); c.setUint16(6,20,true); c.setUint16(8,0x0800,true); c.setUint16(10,0,true);
-      c.setUint16(12,tm,true); c.setUint16(14,dt,true); c.setUint32(16,crc,true); c.setUint32(20,sz,true); c.setUint32(24,sz,true);
-      c.setUint16(28,nm.length,true); c.setUint32(42,off,true);
-      parts.push(h.buffer,nm,f.data); central.push(c.buffer,nm);
-      off += 30+nm.length+sz;
-    });
-    var csz = central.reduce(function(a,b){ return a+(b.byteLength||b.length); },0);
-    var e = new DataView(new ArrayBuffer(22));
-    e.setUint32(0,0x06054b50,true); e.setUint16(8,files.length,true); e.setUint16(10,files.length,true);
-    e.setUint32(12,csz,true); e.setUint32(16,off,true);
-    return new Blob(parts.concat(central,[e.buffer]),{type:"application/zip"});
-  }
   document.getElementById("zip").addEventListener("click",function(){
     if (!pins.length){ setStatus("Log at least one pin first.",true); return; }
     setStatus("Building ZIP…");
-    var withPhoto = pins.map(function(p,i){ return {p:p,i:i}; }).filter(function(x){ return x.p.hasPhoto; });
-    Promise.all(withPhoto.map(function(x){
-      return getPhoto(x.p.id).then(function(b){ return b && b.arrayBuffer ? b.arrayBuffer() : null; })
-        .then(function(buf){ return buf ? {name:photoName(x.p,x.i),data:new Uint8Array(buf)} : null; });
-    })).then(function(list){
-      var files = list.filter(Boolean);
-      files.unshift({name:"site-pins.csv",data:new TextEncoder().encode(buildCsv())});
-      download(makeZip(files),"site-pins-"+today()+".zip");
-      setStatus("Exported ZIP with "+pins.length+" pins and "+(files.length-1)+" photos.");
+    SP.exportZip(pins).then(function(r){
+      SP.download(r.blob,"site-pins-"+SP.today()+".zip");
+      setStatus("Exported ZIP with "+pins.length+" pins and "+r.photos+" photos."+(r.missed?" "+r.missed+" photos couldn't be fetched, so check your signal and try again.":""),!!r.missed);
     });
   });
   document.getElementById("copy").addEventListener("click",function(){
@@ -629,15 +647,67 @@
     },function(){ window.prompt("Copy these addresses:",text); });
   });
 
-  // Boot
-  Promise.all(pins.filter(function(p){return p.hasPhoto;}).map(function(p){
-    return getPhoto(p.id).then(function(b){ if (b && b.size) photoURLs[p.id] = URL.createObjectURL(b); });
-  })).then(function(){ render(); });
-  pins.forEach(function(p){ addMarker(p); if (!p.address) geocode(p); });
-  renderTrack(); holdScreen();
-  var allPts = fitAll();
-  if (allPts.length) map.fitBounds(L.latLngBounds(allPts),{maxZoom:17,padding:[30,30]});
-  render();
+  // ---- Move pins saved by older versions (phone-only storage) into the upload queue, once ----
+  function migrateOld(){
+    var raw = null, old = [];
+    try { raw = localStorage.getItem(OLD_KEY); old = JSON.parse(raw||"[]"); } catch(e){ return Promise.resolve(); }
+    if (!raw) return Promise.resolve();
+    if (!Array.isArray(old) || !old.length){ try { localStorage.removeItem(OLD_KEY); } catch(e){} return Promise.resolve(); }
+    var oldDb = new Promise(function(res){
+      try {
+        var rq = indexedDB.open("sitePinLogger",1);
+        rq.onupgradeneeded = function(){ rq.result.createObjectStore("photos"); };
+        rq.onsuccess = function(){ res(rq.result); };
+        rq.onerror = function(){ res(null); };
+      } catch(e){ res(null); }
+    });
+    function oldPhoto(db,id){
+      return new Promise(function(res){
+        if (!db) return res(null);
+        try { var rq = db.transaction("photos","readonly").objectStore("photos").get(id); rq.onsuccess = function(){ res(rq.result||null); }; rq.onerror = function(){ res(null); }; }
+        catch(e){ res(null); }
+      });
+    }
+    return oldDb.then(function(db){
+      return Promise.all(old.map(function(o){
+        return (o.hasPhoto ? oldPhoto(db,o.id) : Promise.resolve(null)).then(function(blob){
+          var p = {id:o.id,type:o.type,lat:o.lat,lng:o.lng,acc:o.acc,time:o.time,address:o.address||"",addrKind:o.addrKind||null,
+            edited:!!o.edited,count:(o.count===""||o.count==null)?null:o.count,photoPath:null};
+          var it = {id:p.id,pin:p,photo:blob||null};
+          outbox[p.id] = it; if (blob) setLocalPhoto(p.id,blob);
+          return obPut(it).then(function(saved){ return saved ? true : false; });
+        });
+      })).then(function(oks){
+        if (oks.every(Boolean)){            // only forget the old copy once every pin is safely in the queue
+          try { localStorage.removeItem(OLD_KEY); } catch(e){}
+          if (db){ db.close(); try { indexedDB.deleteDatabase("sitePinLogger"); } catch(e){} }
+        }
+      });
+    });
+  }
+
+  // ---- Boot ----
+  obTx("readonly",function(s){ return s.getAll(); }).then(function(items){
+    (Array.isArray(items)?items:[]).forEach(function(it){
+      if (!it || !it.id || !it.pin) return;
+      if (!(it.photo instanceof Blob)) it.photo = null;   // a damaged photo must never stop the page loading
+      outbox[it.id] = it; if (it.photo) setLocalPhoto(it.id,it.photo);
+    });
+    return migrateOld();
+  }).then(function(){
+    buildPins(); syncMarkers(); render();
+    pins.forEach(function(p){ if (p.pending && !p.address && p.addrKind!=="None") lookupAddress(p); });
+    renderTrack(); holdScreen();
+    var pts = []; track.segs.forEach(function(sg){ sg.forEach(function(q){ pts.push([q[0],q[1]]); }); });
+    pins.forEach(function(p){ pts.push([p.lat,p.lng]); });
+    if (pts.length) map.fitBounds(L.latLngBounds(pts),{maxZoom:17,padding:[30,30]});
+    syncAll().then(function(){
+      if (SP.configured && pins.length && !track.on){
+        var all = pins.map(function(p){return [p.lat,p.lng];}); // after loading everyone's pins, include them in the view
+        if (first) map.fitBounds(L.latLngBounds(all),{maxZoom:17,padding:[30,30]});
+      }
+    });
+  });
   setTimeout(function(){ map.invalidateSize(); },300);
 })();
 </script>

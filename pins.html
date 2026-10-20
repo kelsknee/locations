@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Site Pins: All Data</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root{--ink:#1b2329;--paper:#f6f5f1;--line:#d9d6cc;--muted:#5e6a72;--blue:#2b6cb0;--warn:#a4510a}
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:var(--ink);background:var(--paper);-webkit-tap-highlight-color:transparent}
+  .wrap{max-width:1000px;margin:0 auto;padding:12px 16px calc(24px + env(safe-area-inset-bottom,0px))}
+  header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:8px}
+  h1{font-size:20px;margin:0}
+  a{color:var(--blue);font-weight:600}
+  .sub{font-size:13px;color:var(--muted)}
+  .sub.warn{color:var(--warn)}
+  .btn{appearance:none;border:1.5px solid var(--ink);background:transparent;color:var(--ink);border-radius:10px;padding:9px 12px;font-family:inherit;font-weight:600;font-size:14px;line-height:1;cursor:pointer}
+  .btn.solid{background:var(--ink);color:#fff}
+  .btn.quiet{border-color:var(--line);color:var(--muted)}
+  .btn:disabled{opacity:.5}
+  .btn:focus-visible,.chip:focus-visible,a:focus-visible{outline:3px solid var(--blue);outline-offset:2px}
+  .actions{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin:10px 0}
+  .stat{background:#fff;border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+  .stat b{display:block;font-size:24px;line-height:1.1}
+  .stat span{font-size:12px;color:var(--muted)}
+  #map{height:min(48vh,460px);border-radius:14px;border:1px solid var(--line);background:#e6e3da;margin:10px 0}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 10px}
+  .chip{appearance:none;border:2px solid var(--line);background:#fff;border-radius:999px;padding:8px 14px;font-family:inherit;font-weight:600;font-size:14px;cursor:pointer;color:var(--ink)}
+  .chip[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:#fff}
+  ul{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+  li{display:flex;gap:12px;align-items:flex-start;background:#fff;border:1px solid var(--line);border-radius:12px;padding:10px}
+  li .thumb{flex:0 0 72px;width:72px;height:72px;border-radius:8px;object-fit:cover;border:1px solid var(--line);cursor:pointer;background:#eee;padding:0}
+  li .nothumb{flex:0 0 72px;width:72px;height:72px;border-radius:8px;border:1px dashed var(--line);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:11px;text-align:center}
+  li .txt{flex:1 1 auto;min-width:0;font-size:14px}
+  li .addr{font-weight:700;overflow-wrap:anywhere}
+  li .meta{font-size:12px;color:var(--muted);margin-top:2px;overflow-wrap:anywhere}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
+  .weak{color:var(--warn);font-weight:700}
+  .empty,.notice{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px;font-size:14px;color:var(--muted)}
+  .notice b{color:var(--ink)}
+  .pin{width:32px;height:32px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center}
+  .pin svg{transform:rotate(45deg);width:16px;height:16px}
+  .popimg{display:block;width:200px;max-width:100%;border-radius:6px;margin-top:6px}
+  .lightbox{position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;z-index:5000;padding:16px}
+  .lightbox img{max-width:100%;max-height:100%;border-radius:8px}
+  [hidden]{display:none!important}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Site Pins: All Data</h1>
+    <a href="./">&larr; Back to logger</a>
+  </header>
+  <div id="sub" class="sub">Loading…</div>
+
+  <div id="setup" class="notice" hidden>
+    <b>Shared storage isn't set up yet.</b> This page shows pins from everyone once the storage keys are added to <code>config.js</code>. Steps are in <code>README.md</code>.
+  </div>
+
+  <div id="body" hidden>
+    <div class="stats" id="stats"></div>
+    <div class="actions">
+      <button class="btn solid" id="csv">Export CSV</button>
+      <button class="btn" id="zip">Photos ZIP</button>
+      <button class="btn" id="copy">Copy addresses</button>
+      <button class="btn" id="gpx">Routes GPX</button>
+      <button class="btn quiet" id="fill" hidden>Look up missing addresses</button>
+      <button class="btn quiet" id="reload">Refresh</button>
+    </div>
+    <div id="map" role="application" aria-label="Map of all logged pins and routes"></div>
+    <div class="chips" role="group" aria-label="Filter by type" id="chips">
+      <button class="chip" data-f="all" aria-pressed="true">All</button>
+      <button class="chip" data-f="brush" aria-pressed="false">Brush</button>
+      <button class="chip" data-f="trash" aria-pressed="false">Trash</button>
+      <button class="chip" data-f="tires" aria-pressed="false">Tires</button>
+    </div>
+    <ul id="list" aria-label="All logged pins"></ul>
+  </div>
+</div>
+<div id="lb" class="lightbox" hidden role="dialog" aria-modal="true" aria-label="Photo"><img id="lbimg" alt="Pin photo"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="config.js"></script>
+<script src="shared.js"></script>
+<script>
+(function(){
+  var TYPES = SP.TYPES, esc = SP.esc, fmtCoord = SP.fmtCoord, countLabel = SP.countLabel;
+  var MAX_ACC = 20;
+  var pins = [], tracks = [], filter = "all", sig = "";
+  var subEl = document.getElementById("sub");
+  function sub(msg,warn){ subEl.textContent = msg; subEl.className = "sub"+(warn?" warn":""); }
+
+  if (!SP.configured){
+    document.getElementById("setup").hidden = false;
+    sub("Nothing to show yet.");
+    return;
+  }
+  document.getElementById("body").hidden = false;
+
+  var map = L.map("map").setView([42.3314,-83.0458],11);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,
+    attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(map);
+  var pinLayer = L.layerGroup().addTo(map), routeLayer = L.layerGroup().addTo(map);
+  var fitted = false;
+
+  function visible(){ return filter==="all" ? pins : pins.filter(function(p){return p.type===filter;}); }
+  function stamp(p){
+    var d = new Date(p.time);
+    return d.toLocaleDateString([], {month:"short",day:"numeric",year:"numeric"})+", "+d.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"});
+  }
+
+  function draw(){
+    var list = visible();
+    var c = {brush:0,trash:0,tires:0}, tireTotal = 0;
+    pins.forEach(function(p){ c[p.type]++; if (p.type==="tires" && p.count) tireTotal += p.count; });
+    var miles = tracks.reduce(function(a,t){ return a+SP.segMeters(t.segs)/1609.344; },0);
+    document.getElementById("stats").innerHTML =
+      [[pins.length,"Total pins"],[c.brush,"Brush"],[c.trash,"Trash"],[c.tires,"Tire piles"+(tireTotal?" ("+tireTotal+" tires)":"")],
+       [miles.toFixed(1),"Miles driven ("+tracks.length+" route"+(tracks.length===1?"":"s")+")"]]
+      .map(function(s){ return '<div class="stat"><b>'+s[0]+'</b><span>'+esc(s[1])+'</span></div>'; }).join("");
+    var missing = pins.filter(function(p){ return !p.address && p.addrKind!=="None"; }).length;
+    var fill = document.getElementById("fill");
+    fill.hidden = !missing; fill.textContent = "Look up "+missing+" missing address"+(missing===1?"":"es");
+
+    pinLayer.clearLayers();
+    list.forEach(function(p){
+      var m = L.marker([p.lat,p.lng],{icon:L.divIcon({className:"",iconSize:[32,32],iconAnchor:[16,32],
+        html:'<div class="pin" style="background:'+TYPES[p.type].color+'">'+TYPES[p.type].svg+'</div>'})}).addTo(pinLayer);
+      m.bindPopup("<b>"+TYPES[p.type].label+(p.type==="tires"?" ("+countLabel(p)+")":"")+"</b><br>"+esc(p.address||fmtCoord(p))+
+        (p.photoPath?'<img class="popimg" alt="Photo of this pin" src="'+SP.api.photoUrl(p.photoPath)+'">':""));
+      p._m = m;
+    });
+    routeLayer.clearLayers();
+    tracks.forEach(function(t){
+      L.polyline(t.segs.map(function(sg){return sg.map(function(q){return [q[0],q[1]];});}),
+        {color:"#2b6cb0",weight:4,opacity:.7,lineJoin:"round",interactive:false}).addTo(routeLayer);
+    });
+    if (!fitted){
+      var pts = [];
+      pins.forEach(function(p){ pts.push([p.lat,p.lng]); });
+      tracks.forEach(function(t){ t.segs.forEach(function(sg){ sg.forEach(function(q){ pts.push([q[0],q[1]]); }); }); });
+      if (pts.length){ map.fitBounds(L.latLngBounds(pts),{maxZoom:17,padding:[30,30]}); fitted = true; }
+    }
+
+    var ul = document.getElementById("list");
+    if (!list.length){ ul.innerHTML = '<li class="empty" style="display:block">'+(pins.length?"No pins of this type.":"No pins have been logged yet.")+"</li>"; return; }
+    ul.innerHTML = list.slice().reverse().map(function(p){
+      var th = p.photoPath
+        ? '<img class="thumb" alt="Photo. Tap to enlarge." data-photo="'+esc(p.photoPath)+'" src="'+SP.api.photoUrl(p.photoPath)+'" loading="lazy">'
+        : '<div class="nothumb">No photo</div>';
+      return '<li data-id="'+p.id+'">'+th+'<div class="txt"><div class="addr"><span class="dot" style="background:'+TYPES[p.type].color+'"></span>'+
+        esc(p.address||fmtCoord(p))+'</div>'+
+        '<div class="meta">'+TYPES[p.type].label+(p.type==="tires"?" · "+countLabel(p):"")+" · "+stamp(p)+'</div>'+
+        '<div class="meta">'+fmtCoord(p)+" · "+(p.acc>MAX_ACC?'<span class="weak">±'+p.acc+' m, weak GPS</span>':'±'+p.acc+' m')+
+        (p.addrKind==="Nearest"?" · no street number":"")+
+        ' · <a href="https://www.google.com/maps?q='+p.lat.toFixed(6)+','+p.lng.toFixed(6)+'" target="_blank" rel="noopener">Map</a></div></div></li>';
+    }).join("");
+  }
+
+  function load(){
+    sub("Loading…");
+    return Promise.all([SP.api.listPins(),SP.api.listTracks().catch(function(){return tracks;})]).then(function(r){
+      var s = JSON.stringify(r);
+      pins = r[0]; tracks = r[1];
+      if (s !== sig){ sig = s; draw(); }
+      sub(pins.length+" pin"+(pins.length===1?"":"s")+" from everyone · updated "+new Date().toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}));
+    },function(){ sub("Couldn't load the shared data. Check your connection and tap Refresh.",true); });
+  }
+  load();
+  setInterval(function(){ if (!document.hidden) load(); },30000);
+  document.getElementById("reload").addEventListener("click",load);
+
+  document.getElementById("chips").addEventListener("click",function(e){
+    var f = e.target.getAttribute("data-f"); if (!f) return;
+    filter = f;
+    Array.prototype.forEach.call(document.querySelectorAll(".chip"),function(b){ b.setAttribute("aria-pressed",b.getAttribute("data-f")===f?"true":"false"); });
+    draw();
+  });
+  document.getElementById("list").addEventListener("click",function(e){
+    var ph = e.target.getAttribute("data-photo");
+    if (ph){ document.getElementById("lbimg").src = SP.api.photoUrl(ph); document.getElementById("lb").hidden = false; return; }
+    if (e.target.closest("a")) return;
+    var li = e.target.closest("li[data-id]");
+    if (!li) return;
+    var p = pins.filter(function(x){return x.id===li.dataset.id;})[0];
+    if (p && p._m){ map.setView(p._m.getLatLng(),18); p._m.openPopup(); window.scrollTo({top:0,behavior:"smooth"}); }
+  });
+  document.getElementById("lb").addEventListener("click",function(){ this.hidden = true; });
+  document.addEventListener("keydown",function(e){ if (e.key==="Escape") document.getElementById("lb").hidden = true; });
+
+  // Exports (all pins, regardless of the filter)
+  document.getElementById("csv").addEventListener("click",function(){
+    if (!pins.length){ sub("No pins to export yet.",true); return; }
+    SP.download(new Blob([SP.buildCsv(pins)],{type:"text/csv;charset=utf-8"}),"site-pins-"+SP.today()+".csv");
+    sub("Exported "+pins.length+" pins to CSV.");
+  });
+  document.getElementById("zip").addEventListener("click",function(){
+    if (!pins.length){ sub("No pins to export yet.",true); return; }
+    sub("Building ZIP…");
+    SP.exportZip(pins,tracks).then(function(r){
+      SP.download(r.blob,"site-pins-"+SP.today()+".zip");
+      sub("Exported ZIP with "+pins.length+" pins and "+r.photos+" photos."+(r.missed?" "+r.missed+" photos couldn't be fetched, so try again.":""),!!r.missed);
+    });
+  });
+  document.getElementById("copy").addEventListener("click",function(){
+    if (!pins.length){ sub("No pins to copy yet.",true); return; }
+    var text = pins.map(function(p){ return TYPES[p.type].label+(p.type==="tires"?" ("+countLabel(p)+")":"")+": "+(p.address?p.address+" ("+fmtCoord(p)+")":fmtCoord(p)); }).join("\n");
+    (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject()).then(function(){
+      sub("Copied "+pins.length+" addresses.");
+    },function(){ window.prompt("Copy these addresses:",text); });
+  });
+  document.getElementById("gpx").addEventListener("click",function(){
+    if (!tracks.length){ sub("No routes have been recorded yet.",true); return; }
+    SP.download(new Blob([SP.gpx(tracks)],{type:"application/gpx+xml"}),"routes-"+SP.today()+".gpx");
+  });
+
+  // Fill in addresses that never got looked up (for example if a phone lost signal)
+  var filling = 0;
+  var geocode = SP.makeGeocoder(function(p,r){
+    filling--;
+    if (r && !p.edited){
+      p.address = r.address; p.addrKind = r.addrKind;
+      SP.api.patchPin(p.id,{address:r.address,addrKind:r.addrKind}).catch(function(){});
+    }
+    if (filling<=0){ filling = 0; sig = ""; draw(); sub("Finished looking up addresses."); }
+    else sub("Looking up addresses… "+filling+" left");
+  });
+  document.getElementById("fill").addEventListener("click",function(){
+    var todo = pins.filter(function(p){ return !p.address && p.addrKind!=="None"; });
+    if (!todo.length) return;
+    filling = todo.length; sub("Looking up addresses… "+filling+" left");
+    todo.forEach(geocode);
+  });
+})();
+</script>
+</body>
+</html>
