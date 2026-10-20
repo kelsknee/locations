@@ -27,6 +27,11 @@ create table if not exists public.tracks (
   updated_at  timestamptz not null default now()
 );
 
+-- New Supabase projects don't give the public key access to new tables by default, so grant it.
+-- (Row level security below is what decides what it may actually do.)
+grant usage on schema public to anon;
+grant select, insert, update, delete on public.pins, public.tracks to anon;
+
 alter table public.pins   enable row level security;
 alter table public.tracks enable row level security;
 
